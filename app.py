@@ -214,20 +214,120 @@ def panel_diario(usuario):
         nombres = ", ".join((c.get("usuarios") or {}).get("nombre_completo", "N/D") for c in cierres_hoy)
         st.caption(f"Turno de hoy ya cerrado por: **{nombres}**")
 
-    if st.button("✅ Guardar y cortar turno", type="primary"):
-        supabase.table("cierres_turno").insert(
-            {
-                "fecha": hoy,
-                "evaluador_id": usuario["id"],
-            }
-        ).execute()
-        registrar_log(usuario, "Cerró turno", f"Fecha: {hoy}")
-        st.success(
-            f"Turno cerrado por **{usuario['nombre_completo']}**. Todos los registros de hoy ya estaban "
-            "guardados en la nube en el momento en que los ingresaste; esto deja constancia de quién y "
-            "cuándo se cerró el turno."
+    st.markdown("---")
+
+    cierres_hoy = (
+        supabase.table("cierres_turno")
+        .select("*, usuarios(nombre_completo)")
+        .eq("fecha", hoy)
+        .order("fecha_hora", desc=True)
+        .execute()
+        .data
+    )
+    if cierres_hoy:
+        nombres = ", ".join((c.get("usuarios") or {}).get("nombre_completo", "N/D") for c in cierres_hoy)
+        st.caption(f"Turno de hoy ya cerrado por: **{nombres}**")
+
+    revisar_key = "revisando_cierre"
+    if revisar_key not in st.session_state:
+        st.session_state[revisar_key] = False
+
+    if not st.session_state[revisar_key]:
+        if st.button("✅ Guardar y cortar turno", type="primary"):
+            st.session_state[revisar_key] = True
+            st.rerun()
+    else:
+        st.subheader("🔍 Revisión antes de cerrar el turno")
+        st.caption(
+            "Revisa todos los registros de hoy (de todos los evaluadores). Si alguien se equivocó "
+            "al escribir, corrígelo o elimínalo aquí antes de confirmar. Si todo está bien, "
+            "confirma directamente abajo."
         )
-        st.rerun()
+
+        evaluaciones_hoy_completo = (
+            supabase.table("evaluaciones")
+            .select("*, mesoneros(nombre_completo), usuarios(nombre_completo)")
+            .eq("fecha", hoy)
+            .order("created_at")
+            .execute()
+            .data
+        )
+
+        if not evaluaciones_hoy_completo:
+            st.info("No hay ningún registro hoy. Puedes confirmar el cierre igualmente.")
+        else:
+            for h in evaluaciones_hoy_completo:
+                mesonero_nombre = (h.get("mesoneros") or {}).get("nombre_completo", "N/D")
+                evaluador_nombre = (h.get("usuarios") or {}).get("nombre_completo", "N/D")
+                tipo_texto = "Error estándar" if h["tipo"] == "error_estandar" else "Amonestación grave"
+                icono = "🔸" if h["tipo"] == "error_estandar" else "🚨"
+
+                with st.container(border=True):
+                    col_texto, col_btn = st.columns([4, 1])
+                    col_texto.write(f"{icono} **{mesonero_nombre}** — {tipo_texto} — evaluó: *{evaluador_nombre}*")
+                    col_texto.caption(h["justificacion"])
+
+                    edit_key = f"revision_edit_open_{h['id']}"
+                    if edit_key not in st.session_state:
+                        st.session_state[edit_key] = False
+
+                    if col_btn.button("✏️ Corregir", key=f"revision_btn_edit_{h['id']}"):
+                        st.session_state[edit_key] = not st.session_state[edit_key]
+                        st.rerun()
+
+                    if st.session_state[edit_key]:
+                        with st.form(key=f"revision_form_edit_{h['id']}"):
+                            nueva_just = st.text_area(
+                                "Justificación corregida", value=h["justificacion"], key=f"revision_just_{h['id']}"
+                            )
+                            cg1, cg2 = st.columns(2)
+                            guardar_edit = cg1.form_submit_button("💾 Guardar corrección")
+                            eliminar_edit = cg2.form_submit_button("🗑️ Eliminar este registro")
+
+                            if guardar_edit:
+                                if not nueva_just.strip():
+                                    st.error("La justificación no puede quedar vacía.")
+                                else:
+                                    supabase.table("evaluaciones").update(
+                                        {"justificacion": nueva_just.strip()}
+                                    ).eq("id", h["id"]).execute()
+                                    registrar_log(
+                                        usuario,
+                                        "Corrigió registro antes de cerrar turno",
+                                        f"{mesonero_nombre}: {nueva_just.strip()}",
+                                    )
+                                    st.session_state[edit_key] = False
+                                    st.rerun()
+
+                            if eliminar_edit:
+                                supabase.table("evaluaciones").delete().eq("id", h["id"]).execute()
+                                registrar_log(
+                                    usuario,
+                                    "Eliminó registro antes de cerrar turno",
+                                    f"{mesonero_nombre}: {h['justificacion']}",
+                                )
+                                st.session_state[edit_key] = False
+                                st.rerun()
+
+        st.markdown("---")
+        col_confirmar, col_cancelar = st.columns(2)
+        if col_confirmar.button("✅ Confirmar y cerrar turno", type="primary"):
+            supabase.table("cierres_turno").insert(
+                {
+                    "fecha": hoy,
+                    "evaluador_id": usuario["id"],
+                }
+            ).execute()
+            registrar_log(usuario, "Cerró turno", f"Fecha: {hoy}")
+            st.session_state[revisar_key] = False
+            st.success(
+                f"Turno cerrado por **{usuario['nombre_completo']}**. Todos los registros de hoy ya "
+                "estaban guardados en la nube; esto deja constancia de quién y cuándo se cerró el turno."
+            )
+            st.rerun()
+        if col_cancelar.button("Cancelar"):
+            st.session_state[revisar_key] = False
+            st.rerun()
 
 
 # =================================================================
