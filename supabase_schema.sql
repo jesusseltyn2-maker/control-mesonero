@@ -35,6 +35,7 @@ create table if not exists mesoneros (
 create table if not exists evaluaciones (
     id uuid primary key default gen_random_uuid(),
     fecha date not null default current_date,
+    turno integer not null default 1,
     mesonero_id uuid not null references mesoneros(id) on delete cascade,
     evaluador_id uuid not null references usuarios(id),
     tipo text not null check (tipo in ('error_estandar', 'amonestacion_grave')),
@@ -66,6 +67,7 @@ create index if not exists idx_logs_fecha on logs_auditoria (fecha_hora);
 create table if not exists cierres_turno (
     id uuid primary key default gen_random_uuid(),
     fecha date not null default current_date,
+    turno integer not null default 1,
     evaluador_id uuid not null references usuarios(id),
     fecha_hora timestamptz not null default now()
 );

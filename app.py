@@ -58,10 +58,30 @@ def cerrar_sesion():
 # =================================================================
 def panel_diario(usuario):
     st.header("📋 Panel de Control Diario")
-    st.caption(f"Turno del {date.today().strftime('%d/%m/%Y')} — los registros de hoy se ven abajo; el histórico completo está en el Dashboard.")
 
     supabase = get_supabase_client()
     hoy = date.today().isoformat()
+
+    cierres_hoy = (
+        supabase.table("cierres_turno")
+        .select("*, usuarios(nombre_completo)")
+        .eq("fecha", hoy)
+        .order("turno")
+        .execute()
+        .data
+    )
+    turno_actual = len(cierres_hoy) + 1
+
+    st.caption(
+        f"{date.today().strftime('%d/%m/%Y')} — Turno **#{turno_actual}** en curso. "
+        "El histórico completo está en el Dashboard."
+    )
+    if cierres_hoy:
+        resumen_cierres = ", ".join(
+            f"Turno #{c['turno']} por {(c.get('usuarios') or {}).get('nombre_completo', 'N/D')}"
+            for c in cierres_hoy
+        )
+        st.info(f"Turnos ya cerrados hoy: {resumen_cierres}")
 
     mesoneros_todos = (
         supabase.table("mesoneros").select("*").eq("activo", True).order("nombre_completo").execute().data
@@ -81,7 +101,7 @@ def panel_diario(usuario):
         mesoneros = mesoneros_todos
 
     for mesonero in mesoneros:
-        evals_hoy = (
+        evals_dia = (
             supabase.table("evaluaciones")
             .select("*, usuarios(nombre_completo)")
             .eq("mesonero_id", mesonero["id"])
@@ -89,8 +109,14 @@ def panel_diario(usuario):
             .execute()
             .data
         )
-        errores_std = [e for e in evals_hoy if e["tipo"] == "error_estandar"]
-        amonestaciones = [e for e in evals_hoy if e["tipo"] == "amonestacion_grave"]
+        # El tope de 3 errores es ACUMULADO POR DÍA COMPLETO, sin importar cuántos
+        # turnos haya habido, para que nadie pueda "resetear" su tope cerrando turno.
+        errores_dia = [e for e in evals_dia if e["tipo"] == "error_estandar"]
+        amonestaciones_dia = [e for e in evals_dia if e["tipo"] == "amonestacion_grave"]
+
+        # Lo que se MUESTRA como "de este turno" sí arranca en 0 con cada turno nuevo.
+        errores_turno = [e for e in errores_dia if e.get("turno", 1) == turno_actual]
+        amonestaciones_turno = [e for e in amonestaciones_dia if e.get("turno", 1) == turno_actual]
 
         with st.container(border=True):
             col_info, col_accion = st.columns([2, 3])
@@ -98,22 +124,30 @@ def panel_diario(usuario):
             with col_info:
                 st.subheader(mesonero["nombre_completo"])
                 m1, m2 = st.columns(2)
-                m1.metric("Errores hoy", f"{len(errores_std)}/{MAX_ERRORES_ESTANDAR}")
-                m2.metric("Amonestaciones graves hoy", len(amonestaciones))
+                m1.metric("Errores en este turno", len(errores_turno))
+                m2.metric("Amonestaciones en este turno", len(amonestaciones_turno))
+                st.caption(f"Total acumulado hoy (todos los turnos): {len(errores_dia)}/{MAX_ERRORES_ESTANDAR} errores · {len(amonestaciones_dia)} amonestaciones")
 
-                if errores_std:
-                    with st.expander("Ver justificaciones de errores de hoy"):
-                        for e in errores_std:
+                if errores_turno:
+                    with st.expander("Ver justificaciones de errores de este turno"):
+                        for e in errores_turno:
                             evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
                             st.caption(f"• *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
-                if amonestaciones:
-                    with st.expander("Ver amonestaciones graves de hoy"):
-                        for e in amonestaciones:
+                if amonestaciones_turno:
+                    with st.expander("Ver amonestaciones graves de este turno"):
+                        for e in amonestaciones_turno:
                             evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
                             st.caption(f"⚠️ *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
+                if len(errores_dia) > len(errores_turno) or len(amonestaciones_dia) > len(amonestaciones_turno):
+                    with st.expander("Ver TODO lo registrado hoy (turnos anteriores incluidos)"):
+                        for e in evals_dia:
+                            evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
+                            icono = "🔸" if e["tipo"] == "error_estandar" else "🚨"
+                            numero_turno = e.get("turno", 1)
+                            st.caption(f"{icono} *(turno #{numero_turno} — evaluó: {evaluador_nombre})* — {e['justificacion']}")
 
             with col_accion:
-                puede_error_estandar = len(errores_std) < MAX_ERRORES_ESTANDAR
+                puede_error_estandar = len(errores_dia) < MAX_ERRORES_ESTANDAR
 
                 if puede_error_estandar:
                     with st.form(key=f"form_std_{mesonero['id']}", clear_on_submit=True):
@@ -129,6 +163,7 @@ def panel_diario(usuario):
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
+                                        "turno": turno_actual,
                                         "mesonero_id": mesonero["id"],
                                         "evaluador_id": usuario["id"],
                                         "tipo": "error_estandar",
@@ -138,14 +173,14 @@ def panel_diario(usuario):
                                 registrar_log(
                                     usuario,
                                     "Registró error estándar",
-                                    f"{mesonero['nombre_completo']}: {justificacion.strip()}",
+                                    f"{mesonero['nombre_completo']} (turno #{turno_actual}): {justificacion.strip()}",
                                 )
                                 st.rerun()
                 else:
                     st.warning(
                         f"⚠️ **{mesonero['nombre_completo']}** ya alcanzó el máximo de "
-                        f"{MAX_ERRORES_ESTANDAR} errores estándar hoy. El próximo registro "
-                        "debe ser una amonestación grave."
+                        f"{MAX_ERRORES_ESTANDAR} errores estándar HOY (acumulado de todos los turnos). "
+                        "El próximo registro debe ser una amonestación grave."
                     )
                     with st.form(key=f"form_grave_auto_{mesonero['id']}", clear_on_submit=True):
                         justificacion = st.text_area(
@@ -161,6 +196,7 @@ def panel_diario(usuario):
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
+                                        "turno": turno_actual,
                                         "mesonero_id": mesonero["id"],
                                         "evaluador_id": usuario["id"],
                                         "tipo": "amonestacion_grave",
@@ -170,7 +206,7 @@ def panel_diario(usuario):
                                 registrar_log(
                                     usuario,
                                     "Registró amonestación grave (por exceso de errores)",
-                                    f"{mesonero['nombre_completo']}: {justificacion.strip()}",
+                                    f"{mesonero['nombre_completo']} (turno #{turno_actual}): {justificacion.strip()}",
                                 )
                                 st.rerun()
 
@@ -187,6 +223,7 @@ def panel_diario(usuario):
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
+                                        "turno": turno_actual,
                                         "mesonero_id": mesonero["id"],
                                         "evaluador_id": usuario["id"],
                                         "tipo": "amonestacion_grave",
@@ -196,67 +233,42 @@ def panel_diario(usuario):
                                 registrar_log(
                                     usuario,
                                     "Registró amonestación grave directa",
-                                    f"{mesonero['nombre_completo']}: {justificacion_directa.strip()}",
+                                    f"{mesonero['nombre_completo']} (turno #{turno_actual}): {justificacion_directa.strip()}",
                                 )
                                 st.rerun()
 
     st.markdown("---")
-
-    cierres_hoy = (
-        supabase.table("cierres_turno")
-        .select("*, usuarios(nombre_completo)")
-        .eq("fecha", hoy)
-        .order("fecha_hora", desc=True)
-        .execute()
-        .data
-    )
-    if cierres_hoy:
-        nombres = ", ".join((c.get("usuarios") or {}).get("nombre_completo", "N/D") for c in cierres_hoy)
-        st.caption(f"Turno de hoy ya cerrado por: **{nombres}**")
-
-    st.markdown("---")
-
-    cierres_hoy = (
-        supabase.table("cierres_turno")
-        .select("*, usuarios(nombre_completo)")
-        .eq("fecha", hoy)
-        .order("fecha_hora", desc=True)
-        .execute()
-        .data
-    )
-    if cierres_hoy:
-        nombres = ", ".join((c.get("usuarios") or {}).get("nombre_completo", "N/D") for c in cierres_hoy)
-        st.caption(f"Turno de hoy ya cerrado por: **{nombres}**")
 
     revisar_key = "revisando_cierre"
     if revisar_key not in st.session_state:
         st.session_state[revisar_key] = False
 
     if not st.session_state[revisar_key]:
-        if st.button("✅ Guardar y cortar turno", type="primary"):
+        if st.button(f"✅ Guardar y cortar turno #{turno_actual}", type="primary"):
             st.session_state[revisar_key] = True
             st.rerun()
     else:
-        st.subheader("🔍 Revisión antes de cerrar el turno")
+        st.subheader(f"🔍 Revisión antes de cerrar el turno #{turno_actual}")
         st.caption(
-            "Revisa todos los registros de hoy (de todos los evaluadores). Si alguien se equivocó "
+            "Revisa los registros de ESTE turno (de todos los evaluadores). Si alguien se equivocó "
             "al escribir, corrígelo o elimínalo aquí antes de confirmar. Si todo está bien, "
             "confirma directamente abajo."
         )
 
-        evaluaciones_hoy_completo = (
+        evaluaciones_turno_completo = (
             supabase.table("evaluaciones")
             .select("*, mesoneros(nombre_completo), usuarios(nombre_completo)")
             .eq("fecha", hoy)
+            .eq("turno", turno_actual)
             .order("created_at")
             .execute()
             .data
         )
 
-        if not evaluaciones_hoy_completo:
-            st.info("No hay ningún registro hoy. Puedes confirmar el cierre igualmente.")
+        if not evaluaciones_turno_completo:
+            st.info("No hay ningún registro en este turno. Puedes confirmar el cierre igualmente.")
         else:
-            for h in evaluaciones_hoy_completo:
+            for h in evaluaciones_turno_completo:
                 mesonero_nombre = (h.get("mesoneros") or {}).get("nombre_completo", "N/D")
                 evaluador_nombre = (h.get("usuarios") or {}).get("nombre_completo", "N/D")
                 tipo_texto = "Error estándar" if h["tipo"] == "error_estandar" else "Amonestación grave"
@@ -311,18 +323,20 @@ def panel_diario(usuario):
 
         st.markdown("---")
         col_confirmar, col_cancelar = st.columns(2)
-        if col_confirmar.button("✅ Confirmar y cerrar turno", type="primary"):
+        if col_confirmar.button(f"✅ Confirmar y cerrar turno #{turno_actual}", type="primary"):
             supabase.table("cierres_turno").insert(
                 {
                     "fecha": hoy,
+                    "turno": turno_actual,
                     "evaluador_id": usuario["id"],
                 }
             ).execute()
-            registrar_log(usuario, "Cerró turno", f"Fecha: {hoy}")
+            registrar_log(usuario, "Cerró turno", f"Fecha: {hoy}, turno #{turno_actual}")
             st.session_state[revisar_key] = False
             st.success(
-                f"Turno cerrado por **{usuario['nombre_completo']}**. Todos los registros de hoy ya "
-                "estaban guardados en la nube; esto deja constancia de quién y cuándo se cerró el turno."
+                f"Turno #{turno_actual} cerrado por **{usuario['nombre_completo']}**. El próximo turno "
+                "arranca en 0 en el panel — el tope de 3 errores por día sigue contando desde el total "
+                "acumulado de hoy."
             )
             st.rerun()
         if col_cancelar.button("Cancelar"):
@@ -459,7 +473,9 @@ def dashboard(usuario):
         df_cierres = pd.DataFrame(cierres)
         df_cierres["evaluador"] = df_cierres["usuarios"].apply(lambda x: x["nombre_completo"] if x else "N/A")
         st.dataframe(
-            df_cierres[["fecha", "evaluador", "fecha_hora"]].rename(columns={"fecha_hora": "hora exacta"}),
+            df_cierres[["fecha", "turno", "evaluador", "fecha_hora"]].rename(
+                columns={"turno": "# turno", "fecha_hora": "hora exacta"}
+            ),
             use_container_width=True,
             hide_index=True,
         )
