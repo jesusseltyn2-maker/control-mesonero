@@ -1,0 +1,26 @@
+name: Mantener app despierta
+
+on:
+  schedule:
+    # Cada 6 horas (el límite de Streamlit es 12h sin visitas)
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}  # también se puede correr manualmente desde GitHub
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Visitar y despertar la app si está dormida
+        run: python keepalive.py
