@@ -9,17 +9,36 @@ completa y dashboard de rating/amonestaciones. Datos en Supabase.
 """
 
 import io
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 
 from auth import hash_password, login, registrar_log
 from db import get_supabase_client
+from storage_utils import subir_evidencia
 
 st.set_page_config(page_title="Control de Personal", page_icon="📋", layout="wide")
 
 DEFAULT_MAX_ERRORES = 3
+TZ_VENEZUELA = ZoneInfo("America/Caracas")
+
+
+def hoy_venezuela():
+    """Fecha de 'hoy' según la hora de Venezuela (no la del servidor)."""
+    return datetime.now(TZ_VENEZUELA).date()
+
+
+def hora_venezuela_texto():
+    """Hora actual de Venezuela en formato 24h, para mensajes en pantalla."""
+    return datetime.now(TZ_VENEZUELA).strftime("%d/%m/%Y %H:%M:%S")
+
+
+def convertir_columna_a_hora_venezuela(serie):
+    """Convierte una columna de fecha/hora (guardada en UTC en Supabase) a
+    hora de Venezuela en formato 24h, para mostrar en tablas."""
+    return pd.to_datetime(serie, utc=True, errors="coerce").dt.tz_convert(TZ_VENEZUELA).dt.strftime("%d/%m/%Y %H:%M:%S")
 
 if "usuario" not in st.session_state:
     st.session_state.usuario = None
@@ -79,7 +98,7 @@ def panel_diario(usuario):
     st.header("📋 Panel de Control Diario")
 
     supabase = get_supabase_client()
-    hoy = date.today().isoformat()
+    hoy = hoy_venezuela().isoformat()
 
     areas = cargar_areas(supabase)
     turnos_catalogo = cargar_turnos(supabase)
@@ -158,11 +177,15 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                         for e in errores_dia:
                             evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
                             st.caption(f"• *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
+                            if e.get("imagen_url"):
+                                st.image(e["imagen_url"], width=200)
                 if amonestaciones_dia:
                     with st.expander("Ver amonestaciones graves de hoy"):
                         for e in amonestaciones_dia:
                             evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
                             st.caption(f"⚠️ *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
+                            if e.get("imagen_url"):
+                                st.image(e["imagen_url"], width=200)
 
             with col_accion:
                 puede_error_estandar = len(errores_dia) < max_errores
@@ -173,10 +196,21 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                         justificacion = st.text_area(
                             "Justificación obligatoria", key=f"just_std_{empleado['id']}", height=70
                         )
+                        foto = st.file_uploader(
+                            "📷 Adjuntar foto (opcional)",
+                            type=["png", "jpg", "jpeg"],
+                            key=f"foto_std_{empleado['id']}",
+                        )
                         if st.form_submit_button("➕ Registrar error"):
                             if not justificacion.strip():
                                 st.error("La justificación es obligatoria.")
                             else:
+                                imagen_url = None
+                                if foto is not None:
+                                    try:
+                                        imagen_url = subir_evidencia(supabase, empleado["id"], foto)
+                                    except Exception as e:
+                                        st.warning(f"El registro se guardó, pero la foto no se pudo subir: {e}")
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
@@ -185,6 +219,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                         "evaluador_id": usuario["id"],
                                         "tipo": "error_estandar",
                                         "justificacion": justificacion.strip(),
+                                        "imagen_url": imagen_url,
                                     }
                                 ).execute()
                                 registrar_log(
@@ -205,10 +240,21 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                             key=f"just_grave_auto_{empleado['id']}",
                             height=70,
                         )
+                        foto = st.file_uploader(
+                            "📷 Adjuntar foto (opcional)",
+                            type=["png", "jpg", "jpeg"],
+                            key=f"foto_grave_auto_{empleado['id']}",
+                        )
                         if st.form_submit_button("🚨 Registrar amonestación grave"):
                             if not justificacion.strip():
                                 st.error("La justificación es obligatoria.")
                             else:
+                                imagen_url = None
+                                if foto is not None:
+                                    try:
+                                        imagen_url = subir_evidencia(supabase, empleado["id"], foto)
+                                    except Exception as e:
+                                        st.warning(f"El registro se guardó, pero la foto no se pudo subir: {e}")
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
@@ -217,6 +263,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                         "evaluador_id": usuario["id"],
                                         "tipo": "amonestacion_grave",
                                         "justificacion": justificacion.strip(),
+                                        "imagen_url": imagen_url,
                                     }
                                 ).execute()
                                 registrar_log(
@@ -231,10 +278,21 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                         justificacion_directa = st.text_area(
                             "Justificación obligatoria", key=f"just_directa_{empleado['id']}", height=70
                         )
+                        foto = st.file_uploader(
+                            "📷 Adjuntar foto (opcional)",
+                            type=["png", "jpg", "jpeg"],
+                            key=f"foto_directa_{empleado['id']}",
+                        )
                         if st.form_submit_button("🚨 Registrar falta grave directa"):
                             if not justificacion_directa.strip():
                                 st.error("La justificación es obligatoria.")
                             else:
+                                imagen_url = None
+                                if foto is not None:
+                                    try:
+                                        imagen_url = subir_evidencia(supabase, empleado["id"], foto)
+                                    except Exception as e:
+                                        st.warning(f"El registro se guardó, pero la foto no se pudo subir: {e}")
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
@@ -243,6 +301,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                         "evaluador_id": usuario["id"],
                                         "tipo": "amonestacion_grave",
                                         "justificacion": justificacion_directa.strip(),
+                                        "imagen_url": imagen_url,
                                     }
                                 ).execute()
                                 registrar_log(
@@ -328,6 +387,8 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo):
                         f"{icono} **{empleado_nombre}** ({area_nombre}) — {tipo_texto} — evaluó: *{evaluador_nombre}*"
                     )
                     col_texto.caption(h["justificacion"])
+                    if h.get("imagen_url"):
+                        col_texto.image(h["imagen_url"], width=200)
 
                     edit_key = f"revision_edit_open_{h['id']}"
                     if edit_key not in st.session_state:
@@ -402,9 +463,9 @@ def dashboard(usuario):
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        fecha_inicio = st.date_input("Desde", value=date.today().replace(day=1))
+        fecha_inicio = st.date_input("Desde", value=hoy_venezuela().replace(day=1))
     with col2:
-        fecha_fin = st.date_input("Hasta", value=date.today())
+        fecha_fin = st.date_input("Hasta", value=hoy_venezuela())
     with col3:
         area_sel_nombre = st.selectbox("Área", ["Todas las áreas"] + list(areas_map_nombre.keys()))
 
@@ -427,7 +488,7 @@ def dashboard(usuario):
 
     if not evaluaciones:
         st.info("No hay registros con estos filtros. El historial completo por trabajador, más abajo, no depende de este rango.")
-        df = pd.DataFrame(columns=["fecha", "trabajador", "area", "evaluador", "tipo", "justificacion"])
+        df = pd.DataFrame(columns=["fecha", "trabajador", "area", "evaluador", "tipo", "justificacion", "imagen_url"])
     else:
         df = pd.DataFrame(evaluaciones)
         df["trabajador"] = df["mesoneros"].apply(lambda x: (x or {}).get("nombre_completo", "N/A"))
@@ -485,10 +546,15 @@ def dashboard(usuario):
         st.caption("Todos los trabajadores activos (con estos filtros) tuvieron al menos un registro.")
 
     with st.expander("Ver detalle completo (todas las justificaciones)"):
-        detalle = df[["fecha", "trabajador", "area", "tipo", "evaluador", "justificacion"]].sort_values(
-            "fecha", ascending=False
+        detalle = df[["fecha", "trabajador", "area", "tipo", "evaluador", "justificacion", "imagen_url"]].rename(
+            columns={"imagen_url": "foto"}
+        ).sort_values("fecha", ascending=False)
+        st.dataframe(
+            detalle,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"foto": st.column_config.LinkColumn("foto", display_text="Ver foto")},
         )
-        st.dataframe(detalle, use_container_width=True, hide_index=True)
 
     st.subheader("📝 Registros hechos por cada evaluador")
     actividad = pd.DataFrame(columns=["evaluador", "Total registrado"])
@@ -504,9 +570,9 @@ def dashboard(usuario):
     else:
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df[["fecha", "trabajador", "area", "tipo", "evaluador", "justificacion"]].sort_values("fecha").to_excel(
-                writer, sheet_name="Detalle", index=False
-            )
+            df[["fecha", "trabajador", "area", "tipo", "evaluador", "justificacion", "imagen_url"]].rename(
+                columns={"imagen_url": "foto"}
+            ).sort_values("fecha").to_excel(writer, sheet_name="Detalle", index=False)
             ranking_errores.to_excel(writer, sheet_name="Ranking Errores", index=False)
             ranking_graves.to_excel(writer, sheet_name="Ranking Amonestaciones", index=False)
             actividad.to_excel(writer, sheet_name="Actividad Evaluador", index=False)
@@ -531,8 +597,9 @@ def dashboard(usuario):
         df_cierres = pd.DataFrame(cierres)
         df_cierres["evaluador"] = df_cierres["usuarios"].apply(lambda x: (x or {}).get("nombre_completo", "N/A"))
         df_cierres["turno"] = df_cierres["turnos"].apply(lambda x: (x or {}).get("nombre", "N/A"))
+        df_cierres["hora exacta"] = convertir_columna_a_hora_venezuela(df_cierres["fecha_hora"])
         st.dataframe(
-            df_cierres[["fecha", "turno", "evaluador", "fecha_hora"]].rename(columns={"fecha_hora": "hora exacta"}),
+            df_cierres[["fecha", "turno", "evaluador", "hora exacta"]],
             use_container_width=True,
             hide_index=True,
         )
@@ -576,10 +643,17 @@ def dashboard(usuario):
             df_hist["tipo_texto"] = df_hist["tipo"].map(
                 {"error_estandar": "Error estándar", "amonestacion_grave": "Amonestación grave"}
             )
-            tabla_hist = df_hist[["fecha", "tipo_texto", "evaluador", "justificacion", "created_at"]].rename(
-                columns={"tipo_texto": "tipo", "created_at": "hora exacta"}
+            df_hist["foto"] = df_hist.get("imagen_url", pd.Series(dtype=str))
+            df_hist["hora exacta"] = convertir_columna_a_hora_venezuela(df_hist["created_at"])
+            tabla_hist = df_hist[["fecha", "tipo_texto", "evaluador", "justificacion", "foto", "hora exacta"]].rename(
+                columns={"tipo_texto": "tipo"}
             )
-            st.dataframe(tabla_hist, use_container_width=True, hide_index=True)
+            st.dataframe(
+                tabla_hist,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"foto": st.column_config.LinkColumn("foto", display_text="Ver foto")},
+            )
 
             c1, c2 = st.columns(2)
             c1.metric("Total errores estándar (histórico)", int((df_hist["tipo"] == "error_estandar").sum()))
@@ -601,6 +675,8 @@ def dashboard(usuario):
                 with st.container(border=True):
                     st.write(f"{icono} **{h['fecha']}** — {tipo_texto} — evaluó: *{evaluador_nombre}*")
                     st.caption(h["justificacion"])
+                    if h.get("imagen_url"):
+                        st.image(h["imagen_url"], width=200)
 
                     col_edit, col_delete = st.columns(2)
 
@@ -997,8 +1073,9 @@ def admin_logs(usuario):
         return
 
     df = pd.DataFrame(logs)
+    df["fecha y hora (Venezuela)"] = convertir_columna_a_hora_venezuela(df["fecha_hora"])
     st.dataframe(
-        df[["fecha_hora", "nombre_usuario", "accion", "detalle"]],
+        df[["fecha y hora (Venezuela)", "nombre_usuario", "accion", "detalle"]],
         use_container_width=True,
         hide_index=True,
     )
