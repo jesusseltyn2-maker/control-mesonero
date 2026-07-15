@@ -112,18 +112,40 @@ def panel_diario(usuario):
 
     turnos_map = {t["id"]: t["nombre"] for t in turnos_catalogo}
 
+    # El "último turno del día" es el de mayor 'orden' entre los activos (ej. Noche).
+    # Si ya se cerró hoy, todo lo registrado DESPUÉS de esa hora cuenta como si
+    # fuera un día nuevo (el tope de 3 se reinicia), sin esperar la medianoche real.
+    turno_final = max(turnos_catalogo, key=lambda t: t["orden"])
+    cierre_final_hoy = (
+        supabase.table("cierres_turno")
+        .select("fecha_hora")
+        .eq("fecha", hoy)
+        .eq("turno_id", turno_final["id"])
+        .order("fecha_hora", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    corte_dia_iso = cierre_final_hoy[0]["fecha_hora"] if cierre_final_hoy else None
+
+    if corte_dia_iso:
+        st.success(
+            f"✅ El turno '{turno_final['nombre']}' (último del día) ya se cerró hoy. "
+            "Los contadores de errores/amonestaciones ya están en 0 para lo que se registre de aquí en adelante."
+        )
+
     busqueda = st.text_input("🔍 Buscar trabajador por nombre", placeholder="Escribe un nombre para filtrar...")
 
     tabs = st.tabs([a["nombre"] for a in areas])
     for area, tab in zip(areas, tabs):
         with tab:
-            _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda)
+            _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_iso)
 
     st.markdown("---")
     _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo)
 
 
-def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
+def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_iso):
     empleados_todos = (
         supabase.table("mesoneros")
         .select("*")
@@ -149,14 +171,17 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
     max_errores = area.get("max_errores_estandar") or DEFAULT_MAX_ERRORES
 
     for empleado in empleados:
-        evals_hoy = (
+        q = (
             supabase.table("evaluaciones")
             .select("*, usuarios(nombre_completo)")
             .eq("mesonero_id", empleado["id"])
             .eq("fecha", hoy)
-            .execute()
-            .data
         )
+        if corte_dia_iso:
+            # El último turno del día ya se cerró: solo cuenta lo registrado DESPUÉS de ese cierre.
+            q = q.gt("created_at", corte_dia_iso)
+        evals_hoy = q.execute().data
+
         errores_dia = [e for e in evals_hoy if e["tipo"] == "error_estandar"]
         amonestaciones_dia = [e for e in evals_hoy if e["tipo"] == "amonestacion_grave"]
 
