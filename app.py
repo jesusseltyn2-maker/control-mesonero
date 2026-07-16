@@ -47,6 +47,13 @@ if "usuario" not in st.session_state:
 # =================================================================
 # HELPERS
 # =================================================================
+def cargar_sedes(supabase, solo_activas=True):
+    q = supabase.table("sedes").select("*").order("nombre")
+    if solo_activas:
+        q = q.eq("activo", True)
+    return q.execute().data
+
+
 def cargar_areas(supabase, solo_activas=True):
     q = supabase.table("areas").select("*").order("nombre")
     if solo_activas:
@@ -107,11 +114,25 @@ def panel_diario(usuario):
     supabase = get_supabase_client()
     hoy = hoy_venezuela().isoformat()
 
-    areas = cargar_areas(supabase)
+    sedes = cargar_sedes(supabase)
+    if not sedes:
+        st.info("Todavía no hay sedes configuradas. Pide al Administrador General que las cree en 'Sedes'.")
+        return
+
+    if len(sedes) > 1:
+        sede_sel_nombre = st.radio(
+            "📍 Sede", [s["nombre"] for s in sedes], horizontal=True, key="sede_panel_diario"
+        )
+    else:
+        sede_sel_nombre = sedes[0]["nombre"]
+    sede_sel = next(s for s in sedes if s["nombre"] == sede_sel_nombre)
+
+    areas_todas = cargar_areas(supabase)
+    areas = [a for a in areas_todas if a.get("sede_id") == sede_sel["id"]]
     turnos_catalogo = cargar_turnos(supabase)
 
     if not areas:
-        st.info("Todavía no hay áreas configuradas. Pide al Administrador General que las cree en 'Áreas'.")
+        st.info(f"No hay áreas asignadas a la sede '{sede_sel_nombre}' todavía. Revísalo en 'Áreas'.")
         return
     if not turnos_catalogo:
         st.info("Todavía no hay turnos configurados. Pide al Administrador General que los cree en 'Turnos'.")
@@ -120,14 +141,15 @@ def panel_diario(usuario):
     turnos_map = {t["id"]: t["nombre"] for t in turnos_catalogo}
 
     # El "último turno del día" es el de mayor 'orden' entre los activos (ej. Noche).
-    # Si ya se cerró hoy, todo lo registrado DESPUÉS de esa hora cuenta como si
-    # fuera un día nuevo (el tope de 3 se reinicia), sin esperar la medianoche real.
+    # Si ya se cerró hoy PARA ESTA SEDE, todo lo registrado DESPUÉS de esa hora cuenta
+    # como si fuera un día nuevo (el tope de 3 se reinicia), sin esperar la medianoche real.
     turno_final = max(turnos_catalogo, key=lambda t: t["orden"])
     cierre_final_hoy = (
         supabase.table("cierres_turno")
         .select("fecha_hora")
         .eq("fecha", hoy)
         .eq("turno_id", turno_final["id"])
+        .eq("sede_id", sede_sel["id"])
         .order("fecha_hora", desc=True)
         .limit(1)
         .execute()
@@ -137,7 +159,7 @@ def panel_diario(usuario):
 
     if corte_dia_iso:
         st.success(
-            f"✅ El turno '{turno_final['nombre']}' (último del día) ya se cerró hoy. "
+            f"✅ El turno '{turno_final['nombre']}' (último del día) ya se cerró hoy en '{sede_sel_nombre}'. "
             "Los contadores de errores/amonestaciones ya están en 0 para lo que se registre de aquí en adelante."
         )
 
@@ -149,7 +171,7 @@ def panel_diario(usuario):
             _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_iso)
 
     st.markdown("---")
-    _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo)
+    _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede_sel, areas)
 
 
 def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_iso):
@@ -499,21 +521,26 @@ def _seccion_falta_general(
                         st.rerun()
 
 
-def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo):
-    st.subheader("🔒 Cerrar turno del día")
+def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede, areas_sede):
+    st.subheader(f"🔒 Cerrar turno del día — Sede: {sede['nombre']}")
     st.caption(
-        "Cerrar un turno aplica a TODAS las áreas a la vez (ej: 'Mañana' cierra el turno de "
-        "mañana de mesoneros, cocina, barra, etc., todo junto)."
+        f"Cerrar un turno aquí aplica SOLO a las áreas de la sede '{sede['nombre']}' "
+        f"({', '.join(a['nombre'] for a in areas_sede)}). No afecta otras sedes."
     )
 
+    area_ids_sede = [a["id"] for a in areas_sede]
+
     turnos_map_nombre_id = {t["nombre"]: t["id"] for t in turnos_catalogo}
-    turno_sel_nombre = st.selectbox("¿Qué turno vas a cerrar?", list(turnos_map_nombre_id.keys()), key="turno_a_cerrar")
+    turno_sel_nombre = st.selectbox(
+        "¿Qué turno vas a cerrar?", list(turnos_map_nombre_id.keys()), key=f"turno_a_cerrar_{sede['id']}"
+    )
     turno_sel_id = turnos_map_nombre_id[turno_sel_nombre]
 
     cierres_hoy = (
         supabase.table("cierres_turno")
         .select("*, usuarios(nombre_completo), turnos(nombre)")
         .eq("fecha", hoy)
+        .eq("sede_id", sede["id"])
         .execute()
         .data
     )
@@ -522,35 +549,35 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo):
             f"{(c.get('turnos') or {}).get('nombre', '?')} por {(c.get('usuarios') or {}).get('nombre_completo', 'N/D')}"
             for c in cierres_hoy
         )
-        st.info(f"Turnos ya cerrados hoy: {resumen}")
+        st.info(f"Turnos ya cerrados hoy en '{sede['nombre']}': {resumen}")
 
     ya_cerrado = any(c.get("turno_id") == turno_sel_id for c in cierres_hoy)
     if ya_cerrado:
         st.warning(
-            f"El turno '{turno_sel_nombre}' de hoy ya fue cerrado. Si necesitas corregir algo, "
-            "el Administrador General puede editarlo desde el Dashboard."
+            f"El turno '{turno_sel_nombre}' de hoy en '{sede['nombre']}' ya fue cerrado. Si necesitas "
+            "corregir algo, el Administrador General puede editarlo desde el Dashboard."
         )
         return
 
-    revisar_key = f"revisando_cierre_{turno_sel_id}"
+    revisar_key = f"revisando_cierre_{sede['id']}_{turno_sel_id}"
     if revisar_key not in st.session_state:
         st.session_state[revisar_key] = False
 
     if not st.session_state[revisar_key]:
-        if st.button(f"✅ Guardar y cerrar '{turno_sel_nombre}'", type="primary"):
+        if st.button(f"✅ Guardar y cerrar '{turno_sel_nombre}' en {sede['nombre']}", type="primary"):
             st.session_state[revisar_key] = True
             st.rerun()
     else:
-        st.write(f"#### 🔍 Revisión antes de cerrar '{turno_sel_nombre}'")
+        st.write(f"#### 🔍 Revisión antes de cerrar '{turno_sel_nombre}' — {sede['nombre']}")
         st.caption(
-            "Revisa los registros de hoy de este turno, en todas las áreas. Corrige o elimina si "
-            "hace falta, y confirma abajo."
+            f"Revisa los registros de hoy de este turno, en las áreas de '{sede['nombre']}'. "
+            "Corrige o elimina si hace falta, y confirma abajo."
         )
 
         evaluaciones_turno = (
             supabase.table("evaluaciones")
             .select(
-                "*, mesoneros(nombre_completo, areas(nombre)), usuarios(nombre_completo), categorias_falta(nombre)"
+                "*, mesoneros(nombre_completo, area_id, areas(nombre)), usuarios(nombre_completo), categorias_falta(nombre)"
             )
             .eq("fecha", hoy)
             .eq("turno_id", turno_sel_id)
@@ -558,6 +585,9 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo):
             .execute()
             .data
         )
+        evaluaciones_turno = [
+            e for e in evaluaciones_turno if (e.get("mesoneros") or {}).get("area_id") in area_ids_sede
+        ]
 
         if not evaluaciones_turno:
             st.info("No hay ningún registro hoy para este turno. Puedes confirmar el cierre igualmente.")
@@ -625,17 +655,20 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo):
 
         st.markdown("---")
         col_confirmar, col_cancelar = st.columns(2)
-        if col_confirmar.button(f"✅ Confirmar y cerrar '{turno_sel_nombre}'", type="primary"):
+        if col_confirmar.button(f"✅ Confirmar y cerrar '{turno_sel_nombre}' en {sede['nombre']}", type="primary"):
             supabase.table("cierres_turno").insert(
                 {
                     "fecha": hoy,
                     "turno_id": turno_sel_id,
+                    "sede_id": sede["id"],
                     "evaluador_id": usuario["id"],
                 }
             ).execute()
-            registrar_log(usuario, "Cerró turno", f"Fecha: {hoy}, turno: {turno_sel_nombre}")
+            registrar_log(
+                usuario, "Cerró turno", f"Fecha: {hoy}, turno: {turno_sel_nombre}, sede: {sede['nombre']}"
+            )
             st.session_state[revisar_key] = False
-            st.success(f"Turno '{turno_sel_nombre}' cerrado por **{usuario['nombre_completo']}**.")
+            st.success(f"Turno '{turno_sel_nombre}' de '{sede['nombre']}' cerrado por **{usuario['nombre_completo']}**.")
             st.rerun()
         if col_cancelar.button("Cancelar"):
             st.session_state[revisar_key] = False
@@ -956,12 +989,57 @@ def dashboard(usuario):
 # =================================================================
 # ADMIN: ÁREAS
 # =================================================================
+def admin_sedes(usuario):
+    st.header("📍 Gestión de Sedes")
+    st.caption(
+        "Una sede es una ubicación física (ej. 'Costa América', 'Aeropuerto'). Cada área "
+        "pertenece a una sede, y el cierre de turno es independiente por sede."
+    )
+    supabase = get_supabase_client()
+
+    with st.form("nueva_sede", clear_on_submit=True):
+        nombre = st.text_input("Nombre de la sede (ej. Costa América, Aeropuerto)")
+        submit = st.form_submit_button("➕ Agregar sede")
+        if submit:
+            if not nombre.strip():
+                st.error("El nombre no puede estar vacío.")
+            else:
+                existe = supabase.table("sedes").select("id").eq("nombre", nombre.strip()).execute().data
+                if existe:
+                    st.error("Ya existe una sede con ese nombre.")
+                else:
+                    supabase.table("sedes").insert({"nombre": nombre.strip()}).execute()
+                    registrar_log(usuario, "Agregó sede", nombre.strip())
+                    st.success(f"Sede '{nombre.strip()}' agregada.")
+                    st.rerun()
+
+    st.subheader("Sedes registradas")
+    sedes = supabase.table("sedes").select("*").order("nombre").execute().data
+
+    for s in sedes:
+        c1, c2, c3 = st.columns([3, 1, 1])
+        c1.write(s["nombre"])
+        c2.write("🟢 Activa" if s["activo"] else "🔴 Inactiva")
+        if c3.button("Activar/Desactivar", key=f"toggle_sede_{s['id']}"):
+            supabase.table("sedes").update({"activo": not s["activo"]}).eq("id", s["id"]).execute()
+            registrar_log(usuario, "Cambió estado de sede", s["nombre"])
+            st.rerun()
+
+
 def admin_areas(usuario):
     st.header("🏷️ Gestión de Áreas")
     supabase = get_supabase_client()
 
+    sedes = cargar_sedes(supabase, solo_activas=False)
+    if not sedes:
+        st.warning("Primero crea al menos una sede en 'Sedes'.")
+        return
+    sedes_map = {s["nombre"]: s["id"] for s in sedes}
+    sedes_map_inv = {v: k for k, v in sedes_map.items()}
+
     with st.form("nueva_area", clear_on_submit=True):
         nombre = st.text_input("Nombre del área (ej. Cocina, Barra, Panadería)")
+        sede_sel = st.selectbox("Sede a la que pertenece", list(sedes_map.keys()))
         max_err = st.number_input("Máximo de errores estándar por día", min_value=1, max_value=20, value=3, step=1)
         submit = st.form_submit_button("➕ Agregar área")
         if submit:
@@ -973,19 +1051,25 @@ def admin_areas(usuario):
                     st.error("Ya existe un área con ese nombre.")
                 else:
                     supabase.table("areas").insert(
-                        {"nombre": nombre.strip(), "max_errores_estandar": int(max_err)}
+                        {
+                            "nombre": nombre.strip(),
+                            "max_errores_estandar": int(max_err),
+                            "sede_id": sedes_map[sede_sel],
+                        }
                     ).execute()
-                    registrar_log(usuario, "Agregó área", nombre.strip())
-                    st.success(f"Área '{nombre.strip()}' agregada.")
+                    registrar_log(usuario, "Agregó área", f"{nombre.strip()} ({sede_sel})")
+                    st.success(f"Área '{nombre.strip()}' agregada a la sede '{sede_sel}'.")
                     st.rerun()
 
     st.subheader("Áreas registradas")
     areas = supabase.table("areas").select("*").order("nombre").execute().data
 
     for a in areas:
-        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+        sede_actual_nombre = sedes_map_inv.get(a.get("sede_id"), "Sin sede")
+
+        c1, c2, c3, c4, c5 = st.columns([2, 2, 1, 1, 1])
         c1.write(a["nombre"])
-        c2.write(f"Máx: {a['max_errores_estandar']}")
+        c2.write(f"📍 {sede_actual_nombre} · Máx: {a['max_errores_estandar']}")
         c3.write("🟢 Activa" if a["activo"] else "🔴 Inactiva")
 
         edit_key = f"edit_area_{a['id']}"
@@ -997,6 +1081,12 @@ def admin_areas(usuario):
 
         if st.session_state[edit_key]:
             with st.form(key=f"form_edit_area_{a['id']}"):
+                nueva_sede = st.selectbox(
+                    "Sede",
+                    list(sedes_map.keys()),
+                    index=list(sedes_map.keys()).index(sede_actual_nombre) if sede_actual_nombre in sedes_map else 0,
+                    key=f"sede_edit_{a['id']}",
+                )
                 nuevo_max = st.number_input(
                     f"Nuevo máximo de errores para '{a['nombre']}'",
                     min_value=1,
@@ -1009,8 +1099,10 @@ def admin_areas(usuario):
                 guardar = cg1.form_submit_button("💾 Guardar")
                 cambiar_estado = cg2.form_submit_button("🔁 Activar/Desactivar área")
                 if guardar:
-                    supabase.table("areas").update({"max_errores_estandar": int(nuevo_max)}).eq("id", a["id"]).execute()
-                    registrar_log(usuario, "Editó máximo de errores de área", f"{a['nombre']}: {nuevo_max}")
+                    supabase.table("areas").update(
+                        {"max_errores_estandar": int(nuevo_max), "sede_id": sedes_map[nueva_sede]}
+                    ).eq("id", a["id"]).execute()
+                    registrar_log(usuario, "Editó área", f"{a['nombre']}: sede={nueva_sede}, máx={nuevo_max}")
                     st.session_state[edit_key] = False
                     st.rerun()
                 if cambiar_estado:
@@ -1404,6 +1496,7 @@ else:
     opciones = ["📋 Panel Diario", "📊 Dashboard", "⚙️ Mi cuenta"]
     if usuario_actual["rol"] == "admin_general":
         opciones += [
+            "📍 Sedes",
             "👥 Trabajadores",
             "🏷️ Áreas",
             "🕐 Turnos",
@@ -1424,6 +1517,8 @@ else:
         dashboard(usuario_actual)
     elif seleccion == "⚙️ Mi cuenta":
         mi_cuenta(usuario_actual)
+    elif seleccion == "📍 Sedes":
+        admin_sedes(usuario_actual)
     elif seleccion == "👥 Trabajadores":
         admin_mesoneros(usuario_actual)
     elif seleccion == "🏷️ Áreas":
