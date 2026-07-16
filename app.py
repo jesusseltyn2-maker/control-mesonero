@@ -372,6 +372,132 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                                 )
                                 st.rerun()
 
+    st.markdown("---")
+    _seccion_falta_general(
+        usuario, supabase, hoy, area, categorias_area, opciones_categoria,
+        categoria_id_por_nombre, OPCION_OTRO, corte_dia_iso, max_errores,
+    )
+
+
+def _seccion_falta_general(
+    usuario, supabase, hoy, area, categorias_area, opciones_categoria,
+    categoria_id_por_nombre, OPCION_OTRO, corte_dia_iso, max_errores,
+):
+    turnos_catalogo = cargar_turnos(supabase)
+    if not turnos_catalogo:
+        return
+    turnos_nombre_a_id = {t["nombre"]: t["id"] for t in turnos_catalogo}
+
+    with st.expander(f"📢 Registrar falta general para todo '{area['nombre']}' en un turno"):
+        st.caption(
+            "Esto aplica el MISMO registro a todos los trabajadores activos de esta área que "
+            "tengan asignado el turno que elijas. Úsalo para fallas de equipo (ej. 'no se limpió "
+            "el piso de cocina'), no para casos de una sola persona."
+        )
+        with st.form(key=f"form_general_{area['id']}", clear_on_submit=True):
+            turno_sel_nombre = st.selectbox(
+                "Turno afectado", list(turnos_nombre_a_id.keys()), key=f"turno_general_{area['id']}"
+            )
+            tipo_sel = st.radio(
+                "Tipo", ["Error estándar", "Amonestación grave"], key=f"tipo_general_{area['id']}", horizontal=True
+            )
+            categoria_sel = st.selectbox("Tipo de falta", opciones_categoria, key=f"cat_general_{area['id']}")
+            justificacion = st.text_area(
+                "Justificación obligatoria", key=f"just_general_{area['id']}", height=70
+            )
+            foto = st.file_uploader(
+                "📷 Adjuntar foto (opcional)", type=["png", "jpg", "jpeg"], key=f"foto_general_{area['id']}"
+            )
+            confirmo = st.checkbox(
+                "Confirmo que quiero aplicar esto a TODO el equipo de este turno",
+                key=f"confirm_general_{area['id']}",
+            )
+
+            if st.form_submit_button("🚨 Aplicar a todo el turno"):
+                if not justificacion.strip():
+                    st.error("La justificación es obligatoria.")
+                elif not confirmo:
+                    st.error("Debes marcar la casilla de confirmación antes de aplicar esto a todo el equipo.")
+                else:
+                    turno_sel_id = turnos_nombre_a_id[turno_sel_nombre]
+                    empleados_turno = (
+                        supabase.table("mesoneros")
+                        .select("*")
+                        .eq("activo", True)
+                        .eq("area_id", area["id"])
+                        .eq("turno_id", turno_sel_id)
+                        .execute()
+                        .data
+                    )
+                    if not empleados_turno:
+                        st.warning(
+                            f"No hay trabajadores activos de '{area['nombre']}' asignados al turno '{turno_sel_nombre}'."
+                        )
+                    else:
+                        imagen_url = None
+                        if foto is not None:
+                            try:
+                                imagen_url = subir_evidencia(supabase, f"general-{area['id']}", foto)
+                            except Exception as e:
+                                st.warning(f"No se pudo subir la foto: {e}")
+
+                        categoria_id = (
+                            None if categoria_sel == OPCION_OTRO else categoria_id_por_nombre.get(categoria_sel)
+                        )
+                        tipo_base = "error_estandar" if tipo_sel == "Error estándar" else "amonestacion_grave"
+
+                        aplicados = 0
+                        convertidos_a_grave = 0
+                        for empleado in empleados_turno:
+                            tipo_final = tipo_base
+                            if tipo_base == "error_estandar":
+                                # Respeta el tope individual de cada quien: si ya llegó al máximo
+                                # hoy, para esa persona esto se convierte en amonestación grave.
+                                qd = (
+                                    supabase.table("evaluaciones")
+                                    .select("id")
+                                    .eq("mesonero_id", empleado["id"])
+                                    .eq("fecha", hoy)
+                                    .eq("tipo", "error_estandar")
+                                )
+                                if corte_dia_iso:
+                                    qd = qd.gt("created_at", corte_dia_iso)
+                                errores_existentes = len(qd.execute().data)
+                                if errores_existentes >= max_errores:
+                                    tipo_final = "amonestacion_grave"
+                                    convertidos_a_grave += 1
+
+                            supabase.table("evaluaciones").insert(
+                                {
+                                    "fecha": hoy,
+                                    "turno_id": turno_sel_id,
+                                    "mesonero_id": empleado["id"],
+                                    "evaluador_id": usuario["id"],
+                                    "tipo": tipo_final,
+                                    "categoria_id": categoria_id,
+                                    "justificacion": f"[Falta general del turno] {justificacion.strip()}",
+                                    "imagen_url": imagen_url,
+                                }
+                            ).execute()
+                            aplicados += 1
+
+                        registrar_log(
+                            usuario,
+                            "Registró falta general para área/turno",
+                            f"{area['nombre']} - {turno_sel_nombre}: {aplicados} trabajador(es). {justificacion.strip()}",
+                        )
+                        mensaje = (
+                            f"Aplicado a {aplicados} trabajador(es) de '{area['nombre']}' "
+                            f"en el turno '{turno_sel_nombre}'."
+                        )
+                        if convertidos_a_grave:
+                            mensaje += (
+                                f" ({convertidos_a_grave} ya habían llegado a su tope y se les "
+                                "registró como amonestación grave.)"
+                            )
+                        st.success(mensaje)
+                        st.rerun()
+
 
 def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo):
     st.subheader("🔒 Cerrar turno del día")
