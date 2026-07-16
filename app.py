@@ -61,6 +61,13 @@ def cargar_turnos(supabase, solo_activos=True):
     return q.execute().data
 
 
+def cargar_categorias(supabase, area_id, solo_activas=True):
+    q = supabase.table("categorias_falta").select("*").eq("area_id", area_id).order("nombre")
+    if solo_activas:
+        q = q.eq("activo", True)
+    return q.execute().data
+
+
 # =================================================================
 # LOGIN
 # =================================================================
@@ -170,6 +177,12 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
 
     max_errores = area.get("max_errores_estandar") or DEFAULT_MAX_ERRORES
 
+    categorias_area = cargar_categorias(supabase, area["id"])
+    categorias_map = {c["id"]: c["nombre"] for c in categorias_area}
+    OPCION_OTRO = "Otro (especificar abajo)"
+    opciones_categoria = [c["nombre"] for c in categorias_area] + [OPCION_OTRO]
+    categoria_id_por_nombre = {c["nombre"]: c["id"] for c in categorias_area}
+
     for empleado in empleados:
         q = (
             supabase.table("evaluaciones")
@@ -201,14 +214,16 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                     with st.expander("Ver justificaciones de errores de hoy"):
                         for e in errores_dia:
                             evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
-                            st.caption(f"• *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
+                            cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
+                            st.caption(f"• **[{cat_texto}]** *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
                             if e.get("imagen_url"):
                                 st.image(e["imagen_url"], width=200)
                 if amonestaciones_dia:
                     with st.expander("Ver amonestaciones graves de hoy"):
                         for e in amonestaciones_dia:
                             evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
-                            st.caption(f"⚠️ *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
+                            cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
+                            st.caption(f"⚠️ **[{cat_texto}]** *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
                             if e.get("imagen_url"):
                                 st.image(e["imagen_url"], width=200)
 
@@ -218,6 +233,9 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                 if puede_error_estandar:
                     with st.form(key=f"form_std_{empleado['id']}", clear_on_submit=True):
                         st.write("Registrar **error estándar**")
+                        categoria_sel = st.selectbox(
+                            "Tipo de falta", opciones_categoria, key=f"cat_std_{empleado['id']}"
+                        )
                         justificacion = st.text_area(
                             "Justificación obligatoria", key=f"just_std_{empleado['id']}", height=70
                         )
@@ -236,6 +254,9 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                                         imagen_url = subir_evidencia(supabase, empleado["id"], foto)
                                     except Exception as e:
                                         st.warning(f"El registro se guardó, pero la foto no se pudo subir: {e}")
+                                categoria_id = (
+                                    None if categoria_sel == OPCION_OTRO else categoria_id_por_nombre.get(categoria_sel)
+                                )
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
@@ -243,6 +264,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                                         "mesonero_id": empleado["id"],
                                         "evaluador_id": usuario["id"],
                                         "tipo": "error_estandar",
+                                        "categoria_id": categoria_id,
                                         "justificacion": justificacion.strip(),
                                         "imagen_url": imagen_url,
                                     }
@@ -260,6 +282,9 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                         "una amonestación grave."
                     )
                     with st.form(key=f"form_grave_auto_{empleado['id']}", clear_on_submit=True):
+                        categoria_sel = st.selectbox(
+                            "Tipo de falta", opciones_categoria, key=f"cat_grave_auto_{empleado['id']}"
+                        )
                         justificacion = st.text_area(
                             "Justificación obligatoria (amonestación grave)",
                             key=f"just_grave_auto_{empleado['id']}",
@@ -280,6 +305,9 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                                         imagen_url = subir_evidencia(supabase, empleado["id"], foto)
                                     except Exception as e:
                                         st.warning(f"El registro se guardó, pero la foto no se pudo subir: {e}")
+                                categoria_id = (
+                                    None if categoria_sel == OPCION_OTRO else categoria_id_por_nombre.get(categoria_sel)
+                                )
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
@@ -287,6 +315,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                                         "mesonero_id": empleado["id"],
                                         "evaluador_id": usuario["id"],
                                         "tipo": "amonestacion_grave",
+                                        "categoria_id": categoria_id,
                                         "justificacion": justificacion.strip(),
                                         "imagen_url": imagen_url,
                                     }
@@ -300,6 +329,9 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
 
                 with st.expander("🔴 Registrar amonestación grave directa (falta grave inmediata)"):
                     with st.form(key=f"form_grave_directa_{empleado['id']}", clear_on_submit=True):
+                        categoria_sel = st.selectbox(
+                            "Tipo de falta", opciones_categoria, key=f"cat_directa_{empleado['id']}"
+                        )
                         justificacion_directa = st.text_area(
                             "Justificación obligatoria", key=f"just_directa_{empleado['id']}", height=70
                         )
@@ -318,6 +350,9 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                                         imagen_url = subir_evidencia(supabase, empleado["id"], foto)
                                     except Exception as e:
                                         st.warning(f"El registro se guardó, pero la foto no se pudo subir: {e}")
+                                categoria_id = (
+                                    None if categoria_sel == OPCION_OTRO else categoria_id_por_nombre.get(categoria_sel)
+                                )
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
@@ -325,6 +360,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                                         "mesonero_id": empleado["id"],
                                         "evaluador_id": usuario["id"],
                                         "tipo": "amonestacion_grave",
+                                        "categoria_id": categoria_id,
                                         "justificacion": justificacion_directa.strip(),
                                         "imagen_url": imagen_url,
                                     }
@@ -387,7 +423,9 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo):
 
         evaluaciones_turno = (
             supabase.table("evaluaciones")
-            .select("*, mesoneros(nombre_completo, areas(nombre)), usuarios(nombre_completo)")
+            .select(
+                "*, mesoneros(nombre_completo, areas(nombre)), usuarios(nombre_completo), categorias_falta(nombre)"
+            )
             .eq("fecha", hoy)
             .eq("turno_id", turno_sel_id)
             .order("created_at")
@@ -403,13 +441,15 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo):
                 empleado_nombre = empleado_info.get("nombre_completo", "N/D")
                 area_nombre = (empleado_info.get("areas") or {}).get("nombre", "N/D")
                 evaluador_nombre = (h.get("usuarios") or {}).get("nombre_completo", "N/D")
+                categoria_texto = (h.get("categorias_falta") or {}).get("nombre", "Otro")
                 tipo_texto = "Error estándar" if h["tipo"] == "error_estandar" else "Amonestación grave"
                 icono = "🔸" if h["tipo"] == "error_estandar" else "🚨"
 
                 with st.container(border=True):
                     col_texto, col_btn = st.columns([4, 1])
                     col_texto.write(
-                        f"{icono} **{empleado_nombre}** ({area_nombre}) — {tipo_texto} — evaluó: *{evaluador_nombre}*"
+                        f"{icono} **{empleado_nombre}** ({area_nombre}) — {tipo_texto} — "
+                        f"**[{categoria_texto}]** — evaluó: *{evaluador_nombre}*"
                     )
                     col_texto.caption(h["justificacion"])
                     if h.get("imagen_url"):
@@ -500,7 +540,10 @@ def dashboard(usuario):
 
     evaluaciones = (
         supabase.table("evaluaciones")
-        .select("*, mesoneros(nombre_completo, area_id, areas(nombre)), usuarios(nombre_completo)")
+        .select(
+            "*, mesoneros(nombre_completo, area_id, areas(nombre)), usuarios(nombre_completo), "
+            "categorias_falta(nombre)"
+        )
         .gte("fecha", fecha_inicio.isoformat())
         .lte("fecha", fecha_fin.isoformat())
         .execute()
@@ -513,12 +556,15 @@ def dashboard(usuario):
 
     if not evaluaciones:
         st.info("No hay registros con estos filtros. El historial completo por trabajador, más abajo, no depende de este rango.")
-        df = pd.DataFrame(columns=["fecha", "trabajador", "area", "evaluador", "tipo", "justificacion", "imagen_url"])
+        df = pd.DataFrame(
+            columns=["fecha", "trabajador", "area", "evaluador", "tipo", "categoria", "justificacion", "imagen_url"]
+        )
     else:
         df = pd.DataFrame(evaluaciones)
         df["trabajador"] = df["mesoneros"].apply(lambda x: (x or {}).get("nombre_completo", "N/A"))
         df["area"] = df["mesoneros"].apply(lambda x: ((x or {}).get("areas") or {}).get("nombre", "N/A"))
         df["evaluador"] = df["usuarios"].apply(lambda x: (x or {}).get("nombre_completo", "N/A"))
+        df["categoria"] = df["categorias_falta"].apply(lambda x: (x or {}).get("nombre", "Otro") if x else "Otro")
 
     st.subheader("🏆 Ranking de errores estándar (mayor a menor)")
     errores_df = df[df["tipo"] == "error_estandar"]
@@ -543,6 +589,16 @@ def dashboard(usuario):
         st.bar_chart(ranking_graves.set_index("trabajador"))
     else:
         st.caption("Sin amonestaciones graves con estos filtros.")
+
+    st.subheader("📌 Faltas más comunes (por tipo)")
+    if not df.empty:
+        ranking_categorias = (
+            df.groupby("categoria").size().sort_values(ascending=False).reset_index(name="Total")
+        )
+        st.dataframe(ranking_categorias, use_container_width=True, hide_index=True)
+        st.bar_chart(ranking_categorias.set_index("categoria"))
+    else:
+        st.caption("Sin datos suficientes con estos filtros.")
 
     st.subheader("📈 Tendencia en el tiempo (por semana)")
     if not df.empty:
@@ -571,9 +627,9 @@ def dashboard(usuario):
         st.caption("Todos los trabajadores activos (con estos filtros) tuvieron al menos un registro.")
 
     with st.expander("Ver detalle completo (todas las justificaciones)"):
-        detalle = df[["fecha", "trabajador", "area", "tipo", "evaluador", "justificacion", "imagen_url"]].rename(
-            columns={"imagen_url": "foto"}
-        ).sort_values("fecha", ascending=False)
+        detalle = df[
+            ["fecha", "trabajador", "area", "tipo", "categoria", "evaluador", "justificacion", "imagen_url"]
+        ].rename(columns={"imagen_url": "foto"}).sort_values("fecha", ascending=False)
         st.dataframe(
             detalle,
             use_container_width=True,
@@ -595,11 +651,14 @@ def dashboard(usuario):
     else:
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df[["fecha", "trabajador", "area", "tipo", "evaluador", "justificacion", "imagen_url"]].rename(
-                columns={"imagen_url": "foto"}
-            ).sort_values("fecha").to_excel(writer, sheet_name="Detalle", index=False)
+            df[
+                ["fecha", "trabajador", "area", "tipo", "categoria", "evaluador", "justificacion", "imagen_url"]
+            ].rename(columns={"imagen_url": "foto"}).sort_values("fecha").to_excel(
+                writer, sheet_name="Detalle", index=False
+            )
             ranking_errores.to_excel(writer, sheet_name="Ranking Errores", index=False)
             ranking_graves.to_excel(writer, sheet_name="Ranking Amonestaciones", index=False)
+            ranking_categorias.to_excel(writer, sheet_name="Faltas por Tipo", index=False)
             actividad.to_excel(writer, sheet_name="Actividad Evaluador", index=False)
         st.download_button(
             "📥 Descargar este reporte en Excel",
@@ -652,7 +711,7 @@ def dashboard(usuario):
 
         historial = (
             supabase.table("evaluaciones")
-            .select("*, usuarios(nombre_completo)")
+            .select("*, usuarios(nombre_completo), categorias_falta(nombre)")
             .eq("mesonero_id", opciones_mesonero[mesonero_sel])
             .order("fecha", desc=True)
             .order("created_at", desc=True)
@@ -665,14 +724,15 @@ def dashboard(usuario):
         elif usuario["rol"] != "admin_general":
             df_hist = pd.DataFrame(historial)
             df_hist["evaluador"] = df_hist["usuarios"].apply(lambda x: (x or {}).get("nombre_completo", "N/A"))
+            df_hist["categoria"] = df_hist["categorias_falta"].apply(lambda x: (x or {}).get("nombre", "Otro") if x else "Otro")
             df_hist["tipo_texto"] = df_hist["tipo"].map(
                 {"error_estandar": "Error estándar", "amonestacion_grave": "Amonestación grave"}
             )
             df_hist["foto"] = df_hist.get("imagen_url", pd.Series(dtype=str))
             df_hist["hora exacta"] = convertir_columna_a_hora_venezuela(df_hist["created_at"])
-            tabla_hist = df_hist[["fecha", "tipo_texto", "evaluador", "justificacion", "foto", "hora exacta"]].rename(
-                columns={"tipo_texto": "tipo"}
-            )
+            tabla_hist = df_hist[
+                ["fecha", "tipo_texto", "categoria", "evaluador", "justificacion", "foto", "hora exacta"]
+            ].rename(columns={"tipo_texto": "tipo"})
             st.dataframe(
                 tabla_hist,
                 use_container_width=True,
@@ -694,11 +754,12 @@ def dashboard(usuario):
 
             for h in historial:
                 evaluador_nombre = (h.get("usuarios") or {}).get("nombre_completo", "N/D")
+                categoria_texto = (h.get("categorias_falta") or {}).get("nombre", "Otro")
                 tipo_texto = "Error estándar" if h["tipo"] == "error_estandar" else "Amonestación grave"
                 icono = "🔸" if h["tipo"] == "error_estandar" else "🚨"
 
                 with st.container(border=True):
-                    st.write(f"{icono} **{h['fecha']}** — {tipo_texto} — evaluó: *{evaluador_nombre}*")
+                    st.write(f"{icono} **{h['fecha']}** — {tipo_texto} — **[{categoria_texto}]** — evaluó: *{evaluador_nombre}*")
                     st.caption(h["justificacion"])
                     if h.get("imagen_url"):
                         st.image(h["imagen_url"], width=200)
@@ -868,6 +929,77 @@ def admin_turnos(usuario):
             supabase.table("turnos").update({"activo": not t["activo"]}).eq("id", t["id"]).execute()
             registrar_log(usuario, "Cambió estado de turno", t["nombre"])
             st.rerun()
+
+
+# =================================================================
+# ADMIN: CATEGORÍAS DE FALTA (por área)
+# =================================================================
+def admin_categorias(usuario):
+    st.header("🗂️ Categorías de Falta")
+    st.caption(
+        "Estas categorías son las que aparecen en el desplegable 'Tipo de falta' al registrar "
+        "un error o amonestación. Son propias de cada área, así que no aplican los mismos "
+        "nombres a Cocina que a Cajeras, por ejemplo. Siempre hay una opción 'Otro' disponible "
+        "para lo que no encaje aquí."
+    )
+
+    supabase = get_supabase_client()
+    areas = cargar_areas(supabase, solo_activas=False)
+
+    if not areas:
+        st.warning("Primero crea al menos un área en 'Áreas'.")
+        return
+
+    areas_map = {a["nombre"]: a["id"] for a in areas}
+    area_sel_nombre = st.selectbox("Área", list(areas_map.keys()))
+    area_sel_id = areas_map[area_sel_nombre]
+
+    with st.form("nueva_categoria", clear_on_submit=True):
+        nombre = st.text_input(f"Nueva categoría de falta para '{area_sel_nombre}'")
+        submit = st.form_submit_button("➕ Agregar categoría")
+        if submit:
+            if not nombre.strip():
+                st.error("El nombre no puede estar vacío.")
+            else:
+                existe = (
+                    supabase.table("categorias_falta")
+                    .select("id")
+                    .eq("area_id", area_sel_id)
+                    .eq("nombre", nombre.strip())
+                    .execute()
+                    .data
+                )
+                if existe:
+                    st.error("Ya existe esa categoría en esta área.")
+                else:
+                    supabase.table("categorias_falta").insert(
+                        {"area_id": area_sel_id, "nombre": nombre.strip()}
+                    ).execute()
+                    registrar_log(usuario, "Agregó categoría de falta", f"{area_sel_nombre}: {nombre.strip()}")
+                    st.success(f"Categoría '{nombre.strip()}' agregada a '{area_sel_nombre}'.")
+                    st.rerun()
+
+    st.subheader(f"Categorías de '{area_sel_nombre}'")
+    categorias = (
+        supabase.table("categorias_falta")
+        .select("*")
+        .eq("area_id", area_sel_id)
+        .order("nombre")
+        .execute()
+        .data
+    )
+
+    if not categorias:
+        st.caption("Todavía no hay categorías para esta área.")
+    else:
+        for c in categorias:
+            c1, c2, c3 = st.columns([3, 1, 1])
+            c1.write(c["nombre"])
+            c2.write("🟢 Activa" if c["activo"] else "🔴 Inactiva")
+            if c3.button("Activar/Desactivar", key=f"toggle_categoria_{c['id']}"):
+                supabase.table("categorias_falta").update({"activo": not c["activo"]}).eq("id", c["id"]).execute()
+                registrar_log(usuario, "Cambió estado de categoría de falta", f"{area_sel_nombre}: {c['nombre']}")
+                st.rerun()
 
 
 # =================================================================
@@ -1145,7 +1277,14 @@ else:
 
     opciones = ["📋 Panel Diario", "📊 Dashboard", "⚙️ Mi cuenta"]
     if usuario_actual["rol"] == "admin_general":
-        opciones += ["👥 Trabajadores", "🏷️ Áreas", "🕐 Turnos", "🔑 Usuarios", "🕵️ Auditoría"]
+        opciones += [
+            "👥 Trabajadores",
+            "🏷️ Áreas",
+            "🕐 Turnos",
+            "🗂️ Categorías de Falta",
+            "🔑 Usuarios",
+            "🕵️ Auditoría",
+        ]
 
     seleccion = st.sidebar.radio("Menú", opciones)
 
@@ -1165,6 +1304,8 @@ else:
         admin_areas(usuario_actual)
     elif seleccion == "🕐 Turnos":
         admin_turnos(usuario_actual)
+    elif seleccion == "🗂️ Categorías de Falta":
+        admin_categorias(usuario_actual)
     elif seleccion == "🔑 Usuarios":
         admin_usuarios(usuario_actual)
     elif seleccion == "🕵️ Auditoría":
