@@ -13,6 +13,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from auth import hash_password, login, registrar_log
@@ -714,7 +715,10 @@ def dashboard(usuario):
         evaluaciones = [e for e in evaluaciones if (e.get("mesoneros") or {}).get("area_id") == area_sel_id]
 
     if not evaluaciones:
-        st.info("No hay registros con estos filtros. El historial completo por trabajador, más abajo, no depende de este rango.")
+        st.info(
+            "No hay registros con estos filtros. El historial completo por trabajador, más abajo, "
+            "no depende de este rango."
+        )
         df = pd.DataFrame(
             columns=["fecha", "trabajador", "area", "evaluador", "tipo", "categoria", "justificacion", "imagen_url"]
         )
@@ -725,41 +729,105 @@ def dashboard(usuario):
         df["evaluador"] = df["usuarios"].apply(lambda x: (x or {}).get("nombre_completo", "N/A"))
         df["categoria"] = df["categorias_falta"].apply(lambda x: (x or {}).get("nombre", "Otro") if x else "Otro")
 
-    st.subheader("🏆 Ranking de errores estándar (mayor a menor)")
     errores_df = df[df["tipo"] == "error_estandar"]
+    graves_df = df[df["tipo"] == "amonestacion_grave"]
+
     ranking_errores = pd.DataFrame(columns=["trabajador", "Total de errores"])
     if not errores_df.empty:
         ranking_errores = (
             errores_df.groupby("trabajador").size().sort_values(ascending=False).reset_index(name="Total de errores")
         )
-        st.dataframe(ranking_errores, use_container_width=True, hide_index=True)
-        st.bar_chart(ranking_errores.set_index("trabajador"))
-    else:
-        st.caption("Sin errores estándar con estos filtros.")
 
-    st.subheader("🚨 Total de amonestaciones graves (afectan comisiones)")
-    graves_df = df[df["tipo"] == "amonestacion_grave"]
     ranking_graves = pd.DataFrame(columns=["trabajador", "Total amonestaciones"])
     if not graves_df.empty:
         ranking_graves = (
             graves_df.groupby("trabajador").size().sort_values(ascending=False).reset_index(name="Total amonestaciones")
         )
-        st.dataframe(ranking_graves, use_container_width=True, hide_index=True)
-        st.bar_chart(ranking_graves.set_index("trabajador"))
-    else:
-        st.caption("Sin amonestaciones graves con estos filtros.")
 
-    st.subheader("📌 Faltas más comunes (por tipo)")
+    ranking_categorias = pd.DataFrame(columns=["categoria", "Total"])
     if not df.empty:
-        ranking_categorias = (
-            df.groupby("categoria").size().sort_values(ascending=False).reset_index(name="Total")
+        ranking_categorias = df.groupby("categoria").size().sort_values(ascending=False).reset_index(name="Total")
+
+    actividad = pd.DataFrame(columns=["evaluador", "Total registrado"])
+    if not df.empty:
+        actividad = df.groupby("evaluador").size().sort_values(ascending=False).reset_index(name="Total registrado")
+
+    cierres = (
+        supabase.table("cierres_turno")
+        .select("*, usuarios(nombre_completo), turnos(nombre)")
+        .gte("fecha", fecha_inicio.isoformat())
+        .lte("fecha", fecha_fin.isoformat())
+        .order("fecha", desc=True)
+        .execute()
+        .data
+    )
+
+    # -------------------------------------------------------------
+    # 📌 Resumen de un vistazo
+    # -------------------------------------------------------------
+    st.markdown("### 📌 Resumen de un vistazo")
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("🔸 Errores estándar", len(errores_df))
+    k2.metric("🚨 Amonestaciones graves", len(graves_df))
+    k3.metric("👥 Trabajadores con registro", df["trabajador"].nunique() if not df.empty else 0)
+    k4.metric("🔒 Turnos cerrados", len(cierres))
+    top_falta = ranking_categorias.iloc[0]["categoria"] if not ranking_categorias.empty else "—"
+    k5.metric("📌 Falta más común", top_falta)
+    st.divider()
+
+    # -------------------------------------------------------------
+    # 🏆 Rankings (errores y amonestaciones, lado a lado)
+    # -------------------------------------------------------------
+    col_izq, col_der = st.columns(2)
+
+    with col_izq:
+        st.markdown("#### 🏆 Ranking de errores estándar")
+        if not ranking_errores.empty:
+            st.dataframe(ranking_errores, use_container_width=True, hide_index=True)
+            fig = px.bar(
+                ranking_errores, x="trabajador", y="Total de errores", text="Total de errores",
+                color_discrete_sequence=["#F2A007"],
+            )
+            fig.update_traces(textposition="outside")
+            fig.update_layout(xaxis_title="", yaxis_title="", margin=dict(t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.caption("Sin errores estándar con estos filtros.")
+
+    with col_der:
+        st.markdown("#### 🚨 Ranking de amonestaciones graves")
+        if not ranking_graves.empty:
+            st.dataframe(ranking_graves, use_container_width=True, hide_index=True)
+            fig = px.bar(
+                ranking_graves, x="trabajador", y="Total amonestaciones", text="Total amonestaciones",
+                color_discrete_sequence=["#E4572E"],
+            )
+            fig.update_traces(textposition="outside")
+            fig.update_layout(xaxis_title="", yaxis_title="", margin=dict(t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.caption("Sin amonestaciones graves con estos filtros.")
+
+    st.markdown("#### 📌 Faltas más comunes (por tipo)")
+    if not ranking_categorias.empty:
+        col_tabla, col_grafico = st.columns([1, 2])
+        col_tabla.dataframe(ranking_categorias, use_container_width=True, hide_index=True)
+        fig = px.bar(
+            ranking_categorias.sort_values("Total"), x="Total", y="categoria", orientation="h",
+            text="Total", color_discrete_sequence=["#4C6EF5"],
         )
-        st.dataframe(ranking_categorias, use_container_width=True, hide_index=True)
-        st.bar_chart(ranking_categorias.set_index("categoria"))
+        fig.update_traces(textposition="outside")
+        fig.update_layout(xaxis_title="", yaxis_title="", margin=dict(t=10, b=10))
+        col_grafico.plotly_chart(fig, use_container_width=True)
     else:
         st.caption("Sin datos suficientes con estos filtros.")
 
-    st.subheader("📈 Tendencia en el tiempo (por semana)")
+    st.divider()
+
+    # -------------------------------------------------------------
+    # 📈 Tendencia + 🌟 Reconocimiento
+    # -------------------------------------------------------------
+    st.markdown("#### 📈 Tendencia en el tiempo (por semana)")
     if not df.empty:
         df_trend = df.copy()
         df_trend["fecha_dt"] = pd.to_datetime(df_trend["fecha"])
@@ -767,11 +835,19 @@ def dashboard(usuario):
         tendencia = tendencia.rename(
             columns={"error_estandar": "Errores estándar", "amonestacion_grave": "Amonestaciones graves"}
         )
-        st.line_chart(tendencia)
+        tendencia_larga = tendencia.reset_index().melt(
+            id_vars="fecha_dt", var_name="Tipo", value_name="Cantidad"
+        )
+        fig = px.line(
+            tendencia_larga, x="fecha_dt", y="Cantidad", color="Tipo", markers=True,
+            color_discrete_map={"Errores estándar": "#F2A007", "Amonestaciones graves": "#E4572E"},
+        )
+        fig.update_layout(xaxis_title="", yaxis_title="", legend_title="", margin=dict(t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
     else:
         st.caption("No hay suficientes datos para mostrar una tendencia con estos filtros.")
 
-    st.subheader("🌟 Reconocimiento — sin ningún registro en este rango")
+    st.markdown("#### 🌟 Reconocimiento — sin ningún registro en este rango")
     q_activos = supabase.table("mesoneros").select("*, areas(nombre)").eq("activo", True)
     if area_sel_nombre != "Todas las áreas":
         q_activos = q_activos.eq("area_id", areas_map_nombre[area_sel_nombre])
@@ -785,6 +861,13 @@ def dashboard(usuario):
     else:
         st.caption("Todos los trabajadores activos (con estos filtros) tuvieron al menos un registro.")
 
+    st.divider()
+
+    # -------------------------------------------------------------
+    # 📋 Detalle, actividad por evaluador y exportación
+    # -------------------------------------------------------------
+    st.markdown("#### 📋 Detalle, actividad y exportación")
+
     with st.expander("Ver detalle completo (todas las justificaciones)"):
         detalle = df[
             ["fecha", "trabajador", "area", "tipo", "categoria", "evaluador", "justificacion", "imagen_url"]
@@ -796,15 +879,12 @@ def dashboard(usuario):
             column_config={"foto": st.column_config.LinkColumn("foto", display_text="Ver foto")},
         )
 
-    st.subheader("📝 Registros hechos por cada evaluador")
-    actividad = pd.DataFrame(columns=["evaluador", "Total registrado"])
-    if not df.empty:
-        actividad = df.groupby("evaluador").size().sort_values(ascending=False).reset_index(name="Total registrado")
-        st.dataframe(actividad, use_container_width=True, hide_index=True)
-    else:
-        st.caption("Sin actividad registrada con estos filtros.")
+    with st.expander("Ver registros hechos por cada evaluador"):
+        if not actividad.empty:
+            st.dataframe(actividad, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Sin actividad registrada con estos filtros.")
 
-    st.markdown("---")
     if df.empty:
         st.caption("No hay datos con estos filtros para exportar a Excel.")
     else:
@@ -826,31 +906,31 @@ def dashboard(usuario):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-    st.subheader("🔒 Turnos cerrados en este rango")
-    cierres = (
-        supabase.table("cierres_turno")
-        .select("*, usuarios(nombre_completo), turnos(nombre)")
-        .gte("fecha", fecha_inicio.isoformat())
-        .lte("fecha", fecha_fin.isoformat())
-        .order("fecha", desc=True)
-        .execute()
-        .data
-    )
-    if cierres:
-        df_cierres = pd.DataFrame(cierres)
-        df_cierres["evaluador"] = df_cierres["usuarios"].apply(lambda x: (x or {}).get("nombre_completo", "N/A"))
-        df_cierres["turno"] = df_cierres["turnos"].apply(lambda x: (x or {}).get("nombre", "N/A"))
-        df_cierres["hora exacta"] = convertir_columna_a_hora_venezuela(df_cierres["fecha_hora"])
-        st.dataframe(
-            df_cierres[["fecha", "turno", "evaluador", "hora exacta"]],
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.caption("Ningún turno se ha cerrado en este rango.")
+    st.divider()
 
-    st.markdown("---")
-    st.subheader("🔍 Historial completo por trabajador (auditoría)")
+    # -------------------------------------------------------------
+    # 🔒 Turnos cerrados
+    # -------------------------------------------------------------
+    with st.expander("🔒 Ver turnos cerrados en este rango", expanded=False):
+        if cierres:
+            df_cierres = pd.DataFrame(cierres)
+            df_cierres["evaluador"] = df_cierres["usuarios"].apply(lambda x: (x or {}).get("nombre_completo", "N/A"))
+            df_cierres["turno"] = df_cierres["turnos"].apply(lambda x: (x or {}).get("nombre", "N/A"))
+            df_cierres["hora exacta"] = convertir_columna_a_hora_venezuela(df_cierres["fecha_hora"])
+            st.dataframe(
+                df_cierres[["fecha", "turno", "evaluador", "hora exacta"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("Ningún turno se ha cerrado en este rango.")
+
+    st.divider()
+
+    # -------------------------------------------------------------
+    # 🔍 Historial completo por trabajador (auditoría)
+    # -------------------------------------------------------------
+    st.markdown("#### 🔍 Historial completo por trabajador (auditoría)")
     st.caption(
         "Esta sección muestra TODO el historial de un trabajador (no depende de los filtros de "
         "arriba), entrada por entrada, con quién evaluó cada una — para auditar un caso puntual."
