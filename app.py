@@ -76,6 +76,39 @@ def cargar_categorias(supabase, area_id, solo_activas=True):
     return q.execute().data
 
 
+def selector_evidencia(key_prefix):
+    """Muestra el selector de evidencia (foto tomada con la cámara del
+    dispositivo, o un archivo de foto/video ya existente) y devuelve el
+    archivo elegido (o None si no se adjuntó nada)."""
+    modo = st.radio(
+        "📷 Evidencia (opcional)",
+        ["Sin evidencia", "Tomar foto ahora", "Subir foto o video"],
+        key=f"modo_evidencia_{key_prefix}",
+        horizontal=True,
+    )
+    if modo == "Tomar foto ahora":
+        return st.camera_input("Toma la foto", key=f"cam_{key_prefix}")
+    if modo == "Subir foto o video":
+        return st.file_uploader(
+            "Selecciona una foto o video",
+            type=["png", "jpg", "jpeg", "mp4", "mov", "webm"],
+            key=f"upload_{key_prefix}",
+        )
+    return None
+
+
+def mostrar_evidencia(url, width=200):
+    """Muestra una evidencia adjunta como imagen o como video, según su
+    extensión (las fotos tomadas con la cámara son siempre imagen)."""
+    if not url:
+        return
+    extension = url.split(".")[-1].lower().split("?")[0]
+    if extension in ("mp4", "mov", "webm", "avi", "mkv"):
+        st.video(url)
+    else:
+        st.image(url, width=width)
+
+
 # =================================================================
 # LOGIN
 # =================================================================
@@ -240,7 +273,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                             cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
                             st.caption(f"• **[{cat_texto}]** *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
                             if e.get("imagen_url"):
-                                st.image(e["imagen_url"], width=200)
+                                mostrar_evidencia(e["imagen_url"])
                 if amonestaciones_dia:
                     with st.expander("Ver amonestaciones graves de hoy"):
                         for e in amonestaciones_dia:
@@ -248,7 +281,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                             cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
                             st.caption(f"⚠️ **[{cat_texto}]** *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
                             if e.get("imagen_url"):
-                                st.image(e["imagen_url"], width=200)
+                                mostrar_evidencia(e["imagen_url"])
 
             with col_accion:
                 puede_error_estandar = len(errores_dia) < max_errores
@@ -262,11 +295,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                         justificacion = st.text_area(
                             "Justificación obligatoria", key=f"just_std_{empleado['id']}", height=70
                         )
-                        foto = st.file_uploader(
-                            "📷 Adjuntar foto (opcional)",
-                            type=["png", "jpg", "jpeg"],
-                            key=f"foto_std_{empleado['id']}",
-                        )
+                        foto = selector_evidencia(f"std_{empleado['id']}")
                         if st.form_submit_button("➕ Registrar error"):
                             if not justificacion.strip():
                                 st.error("La justificación es obligatoria.")
@@ -313,11 +342,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                             key=f"just_grave_auto_{empleado['id']}",
                             height=70,
                         )
-                        foto = st.file_uploader(
-                            "📷 Adjuntar foto (opcional)",
-                            type=["png", "jpg", "jpeg"],
-                            key=f"foto_grave_auto_{empleado['id']}",
-                        )
+                        foto = selector_evidencia(f"grave_auto_{empleado['id']}")
                         if st.form_submit_button("🚨 Registrar amonestación grave"):
                             if not justificacion.strip():
                                 st.error("La justificación es obligatoria.")
@@ -358,11 +383,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                         justificacion_directa = st.text_area(
                             "Justificación obligatoria", key=f"just_directa_{empleado['id']}", height=70
                         )
-                        foto = st.file_uploader(
-                            "📷 Adjuntar foto (opcional)",
-                            type=["png", "jpg", "jpeg"],
-                            key=f"foto_directa_{empleado['id']}",
-                        )
+                        foto = selector_evidencia(f"directa_{empleado['id']}")
                         if st.form_submit_button("🚨 Registrar falta grave directa"):
                             if not justificacion_directa.strip():
                                 st.error("La justificación es obligatoria.")
@@ -428,9 +449,7 @@ def _seccion_falta_general(
             justificacion = st.text_area(
                 "Justificación obligatoria", key=f"just_general_{area['id']}", height=70
             )
-            foto = st.file_uploader(
-                "📷 Adjuntar foto (opcional)", type=["png", "jpg", "jpeg"], key=f"foto_general_{area['id']}"
-            )
+            foto = selector_evidencia(f"general_{area['id']}")
             confirmo = st.checkbox(
                 "Confirmo que quiero aplicar esto a TODO el equipo de este turno",
                 key=f"confirm_general_{area['id']}",
@@ -610,7 +629,8 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede, areas_s
                     )
                     col_texto.caption(h["justificacion"])
                     if h.get("imagen_url"):
-                        col_texto.image(h["imagen_url"], width=200)
+                        with col_texto:
+                            mostrar_evidencia(h["imagen_url"])
 
                     edit_key = f"revision_edit_open_{h['id']}"
                     if edit_key not in st.session_state:
@@ -1001,7 +1021,7 @@ def dashboard(usuario):
                     st.write(f"{icono} **{h['fecha']}** — {tipo_texto} — **[{categoria_texto}]** — evaluó: *{evaluador_nombre}*")
                     st.caption(h["justificacion"])
                     if h.get("imagen_url"):
-                        st.image(h["imagen_url"], width=200)
+                        mostrar_evidencia(h["imagen_url"])
 
                     col_edit, col_delete = st.columns(2)
 
