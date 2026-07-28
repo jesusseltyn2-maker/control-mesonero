@@ -9,6 +9,7 @@ completa y dashboard de rating/amonestaciones. Datos en Supabase.
 """
 
 import io
+import time
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -23,6 +24,7 @@ from storage_utils import subir_evidencia
 st.set_page_config(page_title="Control de Personal", page_icon="📋", layout="wide")
 
 DEFAULT_MAX_ERRORES = 3
+INACTIVIDAD_MAXIMA_SEGUNDOS = 25 * 60  # 25 minutos
 TZ_VENEZUELA = ZoneInfo("America/Caracas")
 
 
@@ -153,11 +155,25 @@ def panel_diario(usuario):
     sede_sel = next(s for s in sedes if s["nombre"] == sede_sel_nombre)
 
     areas_todas = cargar_areas(supabase)
-    areas = [a for a in areas_todas if a.get("sede_id") == sede_sel["id"]]
+    areas_sede = [a for a in areas_todas if a.get("sede_id") == sede_sel["id"]]
+
+    # Si el evaluador tiene áreas específicas asignadas, solo ve esas (dentro de
+    # esta sede). Si no tiene ninguna asignación configurada, ve todas (permisivo
+    # por defecto para no bloquear a nadie antes de que el admin lo configure).
+    if usuario["rol"] != "admin_general":
+        areas_asignadas_ids = {
+            r["area_id"] for r in supabase.table("usuario_areas").select("area_id").eq("usuario_id", usuario["id"]).execute().data
+        }
+        if areas_asignadas_ids:
+            areas_sede = [a for a in areas_sede if a["id"] in areas_asignadas_ids]
+
     turnos_catalogo = cargar_turnos(supabase)
 
-    if not areas:
-        st.info(f"No hay áreas asignadas a la sede '{sede_sel_nombre}' todavía. Revísalo en 'Áreas'.")
+    if not areas_sede:
+        st.info(
+            f"No tienes áreas disponibles en la sede '{sede_sel_nombre}'. Si esto no es correcto, "
+            "pide al Administrador General que revise tus áreas asignadas en 'Usuarios'."
+        )
         return
     if not turnos_catalogo:
         st.info("Todavía no hay turnos configurados. Pide al Administrador General que los cree en 'Turnos'.")
@@ -190,13 +206,17 @@ def panel_diario(usuario):
 
     busqueda = st.text_input("🔍 Buscar trabajador por nombre", placeholder="Escribe un nombre para filtrar...")
 
-    tabs = st.tabs([a["nombre"] for a in areas])
-    for area, tab in zip(areas, tabs):
-        with tab:
-            _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_iso)
+    nombres_area = [a["nombre"] for a in areas_sede]
+    area_sel_nombre = st.selectbox("Área", nombres_area, key="area_panel_diario")
+    # Si al cambiar de sede el área recordada ya no existe en esta sede, usar la primera.
+    if area_sel_nombre not in nombres_area:
+        area_sel_nombre = nombres_area[0]
+    area_sel = next(a for a in areas_sede if a["nombre"] == area_sel_nombre)
+
+    _panel_area(usuario, supabase, hoy, area_sel, turnos_map, busqueda, corte_dia_iso)
 
     st.markdown("---")
-    _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede_sel, areas)
+    _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede_sel, areas_sede)
 
 
 def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_iso):
@@ -230,18 +250,26 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
     opciones_categoria = [c["nombre"] for c in categorias_area] + [OPCION_OTRO]
     categoria_id_por_nombre = {c["nombre"]: c["id"] for c in categorias_area}
 
-    for empleado in empleados:
-        q = (
-            supabase.table("evaluaciones")
-            .select("*, usuarios(nombre_completo)")
-            .eq("mesonero_id", empleado["id"])
-            .eq("fecha", hoy)
-        )
-        if corte_dia_iso:
-            # El último turno del día ya se cerró: solo cuenta lo registrado DESPUÉS de ese cierre.
-            q = q.gt("created_at", corte_dia_iso)
-        evals_hoy = q.execute().data
+    # Una sola consulta para TODOS los trabajadores del área (en vez de una por
+    # cada uno), y se reparte en memoria — mucho más rápido con muchos trabajadores.
+    ids_empleados = [e["id"] for e in empleados_todos]
+    q = (
+        supabase.table("evaluaciones")
+        .select("*, usuarios(nombre_completo)")
+        .in_("mesonero_id", ids_empleados)
+        .eq("fecha", hoy)
+    )
+    if corte_dia_iso:
+        # El último turno del día ya se cerró: solo cuenta lo registrado DESPUÉS de ese cierre.
+        q = q.gt("created_at", corte_dia_iso)
+    evals_area_hoy = q.execute().data if ids_empleados else []
 
+    evals_por_empleado = {}
+    for e in evals_area_hoy:
+        evals_por_empleado.setdefault(e["mesonero_id"], []).append(e)
+
+    for empleado in empleados:
+        evals_hoy = evals_por_empleado.get(empleado["id"], [])
         errores_dia = [e for e in evals_hoy if e["tipo"] == "error_estandar"]
         amonestaciones_dia = [e for e in evals_hoy if e["tipo"] == "amonestacion_grave"]
 
@@ -256,6 +284,9 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                 m1, m2 = st.columns(2)
                 m1.metric("Errores hoy", f"{len(errores_dia)}/{max_errores}")
                 m2.metric("Amonestaciones hoy", len(amonestaciones_dia))
+
+                if len(errores_dia) == max_errores - 1:
+                    st.warning(f"⚠️ A 1 error de llegar al tope de hoy ({len(errores_dia)}/{max_errores}).")
 
                 if errores_dia:
                     with st.expander("Ver justificaciones de errores de hoy"):
@@ -777,6 +808,12 @@ def dashboard(usuario):
     # 📌 Resumen de un vistazo
     # -------------------------------------------------------------
     st.markdown("### 📌 Resumen de un vistazo")
+
+    marca_general = "[Falta general del turno]"
+    faltas_generales_df = (
+        df[df["justificacion"].str.startswith(marca_general, na=False)] if not df.empty else df
+    )
+
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("🔸 Errores estándar", len(errores_df))
     k2.metric("🚨 Amonestaciones graves", len(graves_df))
@@ -784,6 +821,12 @@ def dashboard(usuario):
     k4.metric("🔒 Turnos cerrados", len(cierres))
     top_falta = ranking_categorias.iloc[0]["categoria"] if not ranking_categorias.empty else "—"
     k5.metric("📌 Falta más común", top_falta)
+
+    k6, k7, k8 = st.columns(3)
+    k6.metric("📢 Faltas de equipo (general)", len(faltas_generales_df))
+    k7.metric("👤 Faltas individuales", len(df) - len(faltas_generales_df) if not df.empty else 0)
+    top_evaluador = actividad.iloc[0]["evaluador"] if not actividad.empty else "—"
+    k8.metric("📝 Evaluador más activo", top_evaluador)
     st.divider()
 
     # -------------------------------------------------------------
@@ -1419,11 +1462,18 @@ def admin_usuarios(usuario):
     st.header("🔑 Gestión de Usuarios Evaluadores")
     supabase = get_supabase_client()
 
+    todas_las_areas = cargar_areas(supabase, solo_activas=False)
+    areas_nombre_a_id = {a["nombre"]: a["id"] for a in todas_las_areas}
+
     with st.form("nuevo_usuario", clear_on_submit=True):
         nombre_completo = st.text_input("Nombre completo")
         nombre_usuario = st.text_input("Usuario (para iniciar sesión)")
         password = st.text_input("Contraseña temporal", type="password")
         rol = st.selectbox("Rol", ["evaluador", "admin_general"])
+        areas_sel = st.multiselect(
+            "Áreas que puede ver y evaluar (déjalo vacío para que vea TODAS)",
+            list(areas_nombre_a_id.keys()),
+        )
         submit = st.form_submit_button("➕ Crear usuario")
 
         if submit:
@@ -1440,14 +1490,24 @@ def admin_usuarios(usuario):
                 if existe:
                     st.error("Ese nombre de usuario ya existe.")
                 else:
-                    supabase.table("usuarios").insert(
-                        {
-                            "nombre_completo": nombre_completo.strip(),
-                            "nombre_usuario": nombre_usuario.strip(),
-                            "password_hash": hash_password(password.strip()),
-                            "rol": rol,
-                        }
-                    ).execute()
+                    nuevo = (
+                        supabase.table("usuarios")
+                        .insert(
+                            {
+                                "nombre_completo": nombre_completo.strip(),
+                                "nombre_usuario": nombre_usuario.strip(),
+                                "password_hash": hash_password(password.strip()),
+                                "rol": rol,
+                            }
+                        )
+                        .execute()
+                        .data
+                    )
+                    nuevo_id = nuevo[0]["id"]
+                    if areas_sel:
+                        supabase.table("usuario_areas").insert(
+                            [{"usuario_id": nuevo_id, "area_id": areas_nombre_a_id[a]} for a in areas_sel]
+                        ).execute()
                     registrar_log(usuario, "Creó usuario", nombre_usuario.strip())
                     st.success("Usuario creado.")
                     st.rerun()
@@ -1456,7 +1516,7 @@ def admin_usuarios(usuario):
     usuarios_lista = supabase.table("usuarios").select("*").order("nombre_completo").execute().data
 
     for u in usuarios_lista:
-        c1, c2, c3, c4, c5 = st.columns([2, 2, 1, 1, 1])
+        c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 1, 1, 1, 1])
         c1.write(u["nombre_completo"])
         c2.write(u["rol"])
         c3.write("🟢" if u["activo"] else "🔴")
@@ -1516,6 +1576,41 @@ def admin_usuarios(usuario):
                             "contraseña para que la use en su próximo inicio de sesión."
                         )
                         st.rerun()
+
+        mostrar_areas_key = f"mostrar_areas_{u['id']}"
+        if mostrar_areas_key not in st.session_state:
+            st.session_state[mostrar_areas_key] = False
+
+        if c6.button("🏷️ Áreas", key=f"btn_areas_{u['id']}"):
+            st.session_state[mostrar_areas_key] = not st.session_state[mostrar_areas_key]
+
+        if st.session_state[mostrar_areas_key]:
+            areas_actuales_ids = {
+                r["area_id"]
+                for r in supabase.table("usuario_areas").select("area_id").eq("usuario_id", u["id"]).execute().data
+            }
+            areas_actuales_nombres = [a["nombre"] for a in todas_las_areas if a["id"] in areas_actuales_ids]
+
+            with st.form(key=f"form_areas_{u['id']}"):
+                st.write(f"Áreas de **{u['nombre_completo']}** (vacío = ve todas)")
+                nuevas_areas_sel = st.multiselect(
+                    "Áreas asignadas",
+                    list(areas_nombre_a_id.keys()),
+                    default=areas_actuales_nombres,
+                    key=f"multiselect_areas_{u['id']}",
+                )
+                if st.form_submit_button("💾 Guardar áreas"):
+                    supabase.table("usuario_areas").delete().eq("usuario_id", u["id"]).execute()
+                    if nuevas_areas_sel:
+                        supabase.table("usuario_areas").insert(
+                            [{"usuario_id": u["id"], "area_id": areas_nombre_a_id[a]} for a in nuevas_areas_sel]
+                        ).execute()
+                    registrar_log(
+                        usuario, "Cambió áreas asignadas de usuario", f"{u['nombre_usuario']}: {nuevas_areas_sel}"
+                    )
+                    st.session_state[mostrar_areas_key] = False
+                    st.success("Áreas actualizadas.")
+                    st.rerun()
 
 
 # =================================================================
@@ -1578,6 +1673,20 @@ def mi_cuenta(usuario):
 if st.session_state.usuario is None:
     pantalla_login()
 else:
+    ahora = time.time()
+    if "ultima_actividad" not in st.session_state:
+        st.session_state.ultima_actividad = ahora
+
+    if ahora - st.session_state.ultima_actividad > INACTIVIDAD_MAXIMA_SEGUNDOS:
+        usuario_inactivo = st.session_state.usuario
+        registrar_log(usuario_inactivo, "Sesión cerrada por inactividad")
+        st.session_state.usuario = None
+        st.session_state.pop("ultima_actividad", None)
+        st.warning("⏰ Tu sesión se cerró por inactividad (25 minutos sin uso). Vuelve a iniciar sesión.")
+        st.stop()
+
+    st.session_state.ultima_actividad = ahora
+
     usuario_actual = st.session_state.usuario
 
     st.sidebar.title(f"👤 {usuario_actual['nombre_completo']}")
