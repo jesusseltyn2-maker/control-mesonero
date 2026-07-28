@@ -77,24 +77,15 @@ def cargar_categorias(supabase, area_id, solo_activas=True):
 
 
 def selector_evidencia(key_prefix):
-    """Muestra el selector de evidencia (foto tomada con la cámara del
-    dispositivo, o un archivo de foto/video ya existente) y devuelve el
-    archivo elegido (o None si no se adjuntó nada)."""
-    modo = st.radio(
-        "📷 Evidencia (opcional)",
-        ["Sin evidencia", "Tomar foto ahora", "Subir foto o video"],
-        key=f"modo_evidencia_{key_prefix}",
-        horizontal=True,
+    """Selector único de evidencia (foto o video). No usamos radio +
+    widget condicional porque dentro de un st.form los widgets
+    condicionales no se actualizan hasta que se envía el formulario —
+    por eso un único file_uploader siempre visible es lo confiable."""
+    return st.file_uploader(
+        "📷 Adjuntar foto o video (opcional)",
+        type=["png", "jpg", "jpeg", "mp4", "mov", "webm"],
+        key=f"foto_{key_prefix}",
     )
-    if modo == "Tomar foto ahora":
-        return st.camera_input("Toma la foto", key=f"cam_{key_prefix}")
-    if modo == "Subir foto o video":
-        return st.file_uploader(
-            "Selecciona una foto o video",
-            type=["png", "jpg", "jpeg", "mp4", "mov", "webm"],
-            key=f"upload_{key_prefix}",
-        )
-    return None
 
 
 def mostrar_evidencia(url, width=200):
