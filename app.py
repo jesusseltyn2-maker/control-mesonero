@@ -181,29 +181,6 @@ def panel_diario(usuario):
 
     turnos_map = {t["id"]: t["nombre"] for t in turnos_catalogo}
 
-    # El "último turno del día" es el de mayor 'orden' entre los activos (ej. Noche).
-    # Si ya se cerró hoy PARA ESTA SEDE, todo lo registrado DESPUÉS de esa hora cuenta
-    # como si fuera un día nuevo (el tope de 3 se reinicia), sin esperar la medianoche real.
-    turno_final = max(turnos_catalogo, key=lambda t: t["orden"])
-    cierre_final_hoy = (
-        supabase.table("cierres_turno")
-        .select("fecha_hora")
-        .eq("fecha", hoy)
-        .eq("turno_id", turno_final["id"])
-        .eq("sede_id", sede_sel["id"])
-        .order("fecha_hora", desc=True)
-        .limit(1)
-        .execute()
-        .data
-    )
-    corte_dia_iso = cierre_final_hoy[0]["fecha_hora"] if cierre_final_hoy else None
-
-    if corte_dia_iso:
-        st.success(
-            f"✅ El turno '{turno_final['nombre']}' (último del día) ya se cerró hoy en '{sede_sel_nombre}'. "
-            "Los contadores de errores/amonestaciones ya están en 0 para lo que se registre de aquí en adelante."
-        )
-
     busqueda = st.text_input("🔍 Buscar trabajador por nombre", placeholder="Escribe un nombre para filtrar...")
 
     nombres_area = [a["nombre"] for a in areas_sede]
@@ -213,13 +190,13 @@ def panel_diario(usuario):
         area_sel_nombre = nombres_area[0]
     area_sel = next(a for a in areas_sede if a["nombre"] == area_sel_nombre)
 
-    _panel_area(usuario, supabase, hoy, area_sel, turnos_map, busqueda, corte_dia_iso)
+    _panel_area(usuario, supabase, hoy, area_sel, turnos_map, busqueda)
 
     st.markdown("---")
     _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede_sel, areas_sede)
 
 
-def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_iso):
+def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
     empleados_todos = (
         supabase.table("mesoneros")
         .select("*")
@@ -252,26 +229,27 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
 
     # Una sola consulta para TODOS los trabajadores del área (en vez de una por
     # cada uno), y se reparte en memoria — mucho más rápido con muchos trabajadores.
+    # La ventana de conteo es el MES CALENDARIO actual (no el día ni el turno):
+    # los errores se acumulan durante todo el mes y se reinician el día 1.
+    inicio_mes = hoy[:8] + "01"
     ids_empleados = [e["id"] for e in empleados_todos]
     q = (
         supabase.table("evaluaciones")
         .select("*, usuarios(nombre_completo)")
         .in_("mesonero_id", ids_empleados)
-        .eq("fecha", hoy)
+        .gte("fecha", inicio_mes)
+        .lte("fecha", hoy)
     )
-    if corte_dia_iso:
-        # El último turno del día ya se cerró: solo cuenta lo registrado DESPUÉS de ese cierre.
-        q = q.gt("created_at", corte_dia_iso)
-    evals_area_hoy = q.execute().data if ids_empleados else []
+    evals_area_mes = q.execute().data if ids_empleados else []
 
     evals_por_empleado = {}
-    for e in evals_area_hoy:
+    for e in evals_area_mes:
         evals_por_empleado.setdefault(e["mesonero_id"], []).append(e)
 
     for empleado in empleados:
-        evals_hoy = evals_por_empleado.get(empleado["id"], [])
-        errores_dia = [e for e in evals_hoy if e["tipo"] == "error_estandar"]
-        amonestaciones_dia = [e for e in evals_hoy if e["tipo"] == "amonestacion_grave"]
+        evals_mes = evals_por_empleado.get(empleado["id"], [])
+        errores_mes = [e for e in evals_mes if e["tipo"] == "error_estandar"]
+        amonestaciones_mes = [e for e in evals_mes if e["tipo"] == "amonestacion_grave"]
 
         turno_nombre = turnos_map.get(empleado.get("turno_id"), "Sin turno asignado")
 
@@ -282,31 +260,31 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                 st.subheader(empleado["nombre_completo"])
                 st.caption(f"🕒 Turno fijo: **{turno_nombre}**")
                 m1, m2 = st.columns(2)
-                m1.metric("Errores hoy", f"{len(errores_dia)}/{max_errores}")
-                m2.metric("Amonestaciones hoy", len(amonestaciones_dia))
+                m1.metric("Errores este mes", f"{len(errores_mes)}/{max_errores}")
+                m2.metric("Amonestaciones este mes", len(amonestaciones_mes))
 
-                if len(errores_dia) == max_errores - 1:
-                    st.warning(f"⚠️ A 1 error de llegar al tope de hoy ({len(errores_dia)}/{max_errores}).")
+                if len(errores_mes) == max_errores - 1:
+                    st.warning(f"⚠️ A 1 error de llegar al tope del mes ({len(errores_mes)}/{max_errores}).")
 
-                if errores_dia:
-                    with st.expander("Ver justificaciones de errores de hoy"):
-                        for e in errores_dia:
+                if errores_mes:
+                    with st.expander("Ver justificaciones de errores de este mes"):
+                        for e in errores_mes:
                             evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
                             cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
-                            st.caption(f"• **[{cat_texto}]** *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
+                            st.caption(f"• **[{cat_texto}]** *({e['fecha']} — evaluó: {evaluador_nombre})* — {e['justificacion']}")
                             if e.get("imagen_url"):
                                 mostrar_evidencia(e["imagen_url"])
-                if amonestaciones_dia:
-                    with st.expander("Ver amonestaciones graves de hoy"):
-                        for e in amonestaciones_dia:
+                if amonestaciones_mes:
+                    with st.expander("Ver amonestaciones graves de este mes"):
+                        for e in amonestaciones_mes:
                             evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
                             cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
-                            st.caption(f"⚠️ **[{cat_texto}]** *(evaluó: {evaluador_nombre})* — {e['justificacion']}")
+                            st.caption(f"⚠️ **[{cat_texto}]** *({e['fecha']} — evaluó: {evaluador_nombre})* — {e['justificacion']}")
                             if e.get("imagen_url"):
                                 mostrar_evidencia(e["imagen_url"])
 
             with col_accion:
-                puede_error_estandar = len(errores_dia) < max_errores
+                puede_error_estandar = len(errores_mes) < max_errores
 
                 if puede_error_estandar:
                     with st.form(key=f"form_std_{empleado['id']}", clear_on_submit=True):
@@ -352,7 +330,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
                 else:
                     st.warning(
                         f"⚠️ **{empleado['nombre_completo']}** ya alcanzó el máximo de {max_errores} "
-                        f"errores estándar hoy en '{area['nombre']}'. El próximo registro debe ser "
+                        f"errores estándar este mes en '{area['nombre']}'. El próximo registro debe ser "
                         "una amonestación grave."
                     )
                     with st.form(key=f"form_grave_auto_{empleado['id']}", clear_on_submit=True):
@@ -441,13 +419,13 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda, corte_dia_is
     st.markdown("---")
     _seccion_falta_general(
         usuario, supabase, hoy, area, categorias_area, opciones_categoria,
-        categoria_id_por_nombre, OPCION_OTRO, corte_dia_iso, max_errores,
+        categoria_id_por_nombre, OPCION_OTRO, max_errores,
     )
 
 
 def _seccion_falta_general(
     usuario, supabase, hoy, area, categorias_area, opciones_categoria,
-    categoria_id_por_nombre, OPCION_OTRO, corte_dia_iso, max_errores,
+    categoria_id_por_nombre, OPCION_OTRO, max_errores,
 ):
     turnos_catalogo = cargar_turnos(supabase)
     if not turnos_catalogo:
@@ -512,21 +490,22 @@ def _seccion_falta_general(
 
                         aplicados = 0
                         convertidos_a_grave = 0
+                        inicio_mes = hoy[:8] + "01"
                         for empleado in empleados_turno:
                             tipo_final = tipo_base
                             if tipo_base == "error_estandar":
                                 # Respeta el tope individual de cada quien: si ya llegó al máximo
-                                # hoy, para esa persona esto se convierte en amonestación grave.
-                                qd = (
+                                # este mes, para esa persona esto se convierte en amonestación grave.
+                                errores_existentes = len(
                                     supabase.table("evaluaciones")
                                     .select("id")
                                     .eq("mesonero_id", empleado["id"])
-                                    .eq("fecha", hoy)
+                                    .gte("fecha", inicio_mes)
+                                    .lte("fecha", hoy)
                                     .eq("tipo", "error_estandar")
+                                    .execute()
+                                    .data
                                 )
-                                if corte_dia_iso:
-                                    qd = qd.gt("created_at", corte_dia_iso)
-                                errores_existentes = len(qd.execute().data)
                                 if errores_existentes >= max_errores:
                                     tipo_final = "amonestacion_grave"
                                     convertidos_a_grave += 1
@@ -567,7 +546,9 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede, areas_s
     st.subheader(f"🔒 Cerrar turno del día — Sede: {sede['nombre']}")
     st.caption(
         f"Cerrar un turno aquí aplica SOLO a las áreas de la sede '{sede['nombre']}' "
-        f"({', '.join(a['nombre'] for a in areas_sede)}). No afecta otras sedes."
+        f"({', '.join(a['nombre'] for a in areas_sede)}). No afecta otras sedes. "
+        "Esto es solo para dejar constancia de quién y cuándo se cerró cada turno — "
+        "el conteo de errores es mensual y no se ve afectado por cerrar o no un turno."
     )
 
     area_ids_sede = [a["id"] for a in areas_sede]
