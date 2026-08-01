@@ -78,6 +78,15 @@ def cargar_categorias(supabase, area_id, solo_activas=True):
     return q.execute().data
 
 
+def tiene_permiso(usuario, permiso):
+    """El Administrador General siempre tiene todos los permisos. Para
+    evaluadores, se revisa la columna correspondiente (por defecto True
+    si no existe, para no bloquear a nadie antes de que se configure)."""
+    if usuario["rol"] == "admin_general":
+        return True
+    return usuario.get(permiso, True)
+
+
 def selector_evidencia(key_prefix):
     """Selector único de evidencia (foto o video). No usamos radio +
     widget condicional porque dentro de un st.form los widgets
@@ -417,10 +426,11 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                 st.rerun()
 
     st.markdown("---")
-    _seccion_falta_general(
-        usuario, supabase, hoy, area, categorias_area, opciones_categoria,
-        categoria_id_por_nombre, OPCION_OTRO, max_errores,
-    )
+    if tiene_permiso(usuario, "puede_falta_general"):
+        _seccion_falta_general(
+            usuario, supabase, hoy, area, categorias_area, opciones_categoria,
+            categoria_id_por_nombre, OPCION_OTRO, max_errores,
+        )
 
 
 def _seccion_falta_general(
@@ -574,6 +584,10 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede, areas_s
         )
         st.info(f"Turnos ya cerrados hoy en '{sede['nombre']}': {resumen}")
 
+    if not tiene_permiso(usuario, "puede_cerrar_turno"):
+        st.info("No tienes permiso para cerrar turnos. Si necesitas cerrar uno, contacta a un Administrador General.")
+        return
+
     ya_cerrado = any(c.get("turno_id") == turno_sel_id for c in cierres_hoy)
     if ya_cerrado:
         st.warning(
@@ -639,9 +653,10 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede, areas_s
                     if edit_key not in st.session_state:
                         st.session_state[edit_key] = False
 
-                    if col_btn.button("✏️ Corregir", key=f"revision_btn_edit_{h['id']}"):
-                        st.session_state[edit_key] = not st.session_state[edit_key]
-                        st.rerun()
+                    if tiene_permiso(usuario, "puede_editar_revision"):
+                        if col_btn.button("✏️ Corregir", key=f"revision_btn_edit_{h['id']}"):
+                            st.session_state[edit_key] = not st.session_state[edit_key]
+                            st.rerun()
 
                     if st.session_state[edit_key]:
                         with st.form(key=f"revision_form_edit_{h['id']}"):
@@ -1455,6 +1470,17 @@ def admin_usuarios(usuario):
             "Áreas que puede ver y evaluar (déjalo vacío para que vea TODAS)",
             list(areas_nombre_a_id.keys()),
         )
+        st.caption("Permisos (solo aplican si el rol es 'evaluador' — el Administrador General siempre tiene todo):")
+        pc1, pc2 = st.columns(2)
+        p_cerrar_turno = pc1.checkbox("Puede cerrar turnos", value=True)
+        p_falta_general = pc2.checkbox("Puede registrar falta general", value=True)
+        pc3, pc4 = st.columns(2)
+        p_ver_dashboard = pc3.checkbox("Puede ver el Dashboard", value=True)
+        p_editar_revision = pc4.checkbox("Puede editar/eliminar antes de cerrar turno", value=True)
+        st.caption("Estos dos dan acceso a páginas normalmente solo del Administrador General:")
+        pc5, pc6 = st.columns(2)
+        p_cargar_trabajadores = pc5.checkbox("Puede cargar trabajadores", value=False)
+        p_crear_areas = pc6.checkbox("Puede crear áreas", value=False)
         submit = st.form_submit_button("➕ Crear usuario")
 
         if submit:
@@ -1479,6 +1505,12 @@ def admin_usuarios(usuario):
                                 "nombre_usuario": nombre_usuario.strip(),
                                 "password_hash": hash_password(password.strip()),
                                 "rol": rol,
+                                "puede_cerrar_turno": p_cerrar_turno,
+                                "puede_falta_general": p_falta_general,
+                                "puede_ver_dashboard": p_ver_dashboard,
+                                "puede_editar_revision": p_editar_revision,
+                                "puede_cargar_trabajadores": p_cargar_trabajadores,
+                                "puede_crear_areas": p_crear_areas,
                             }
                         )
                         .execute()
@@ -1498,7 +1530,7 @@ def admin_usuarios(usuario):
     admins_activos = sum(1 for x in usuarios_lista if x["rol"] == "admin_general" and x["activo"])
 
     for u in usuarios_lista:
-        c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 2, 1, 1, 1, 1, 1])
+        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([2, 2, 1, 1, 1, 1, 1, 1])
         c1.write(u["nombre_completo"])
         c2.write(u["rol"])
         c3.write("🟢" if u["activo"] else "🔴")
@@ -1597,6 +1629,65 @@ def admin_usuarios(usuario):
                     st.session_state[mostrar_areas_key] = False
                     st.success("Áreas actualizadas.")
                     st.rerun()
+
+        mostrar_permisos_key = f"mostrar_permisos_{u['id']}"
+        if mostrar_permisos_key not in st.session_state:
+            st.session_state[mostrar_permisos_key] = False
+
+        if c8.button("⚙️ Permisos", key=f"btn_permisos_{u['id']}"):
+            st.session_state[mostrar_permisos_key] = not st.session_state[mostrar_permisos_key]
+
+        if st.session_state[mostrar_permisos_key]:
+            if u["rol"] == "admin_general":
+                st.info(f"'{u['nombre_completo']}' es Administrador General: siempre tiene todos los permisos.")
+            else:
+                with st.form(key=f"form_permisos_{u['id']}"):
+                    st.write(f"Permisos de **{u['nombre_completo']}**")
+                    pp1, pp2 = st.columns(2)
+                    np_cerrar_turno = pp1.checkbox(
+                        "Puede cerrar turnos", value=u.get("puede_cerrar_turno", True), key=f"perm_cerrar_{u['id']}"
+                    )
+                    np_falta_general = pp2.checkbox(
+                        "Puede registrar falta general",
+                        value=u.get("puede_falta_general", True),
+                        key=f"perm_general_{u['id']}",
+                    )
+                    pp3, pp4 = st.columns(2)
+                    np_ver_dashboard = pp3.checkbox(
+                        "Puede ver el Dashboard", value=u.get("puede_ver_dashboard", True), key=f"perm_dash_{u['id']}"
+                    )
+                    np_editar_revision = pp4.checkbox(
+                        "Puede editar/eliminar antes de cerrar turno",
+                        value=u.get("puede_editar_revision", True),
+                        key=f"perm_revision_{u['id']}",
+                    )
+                    st.caption("Estos dos dan acceso a páginas normalmente solo del Administrador General:")
+                    pp5, pp6 = st.columns(2)
+                    np_cargar_trabajadores = pp5.checkbox(
+                        "Puede cargar trabajadores",
+                        value=u.get("puede_cargar_trabajadores", False),
+                        key=f"perm_trabajadores_{u['id']}",
+                    )
+                    np_crear_areas = pp6.checkbox(
+                        "Puede crear áreas",
+                        value=u.get("puede_crear_areas", False),
+                        key=f"perm_areas_{u['id']}",
+                    )
+                    if st.form_submit_button("💾 Guardar permisos"):
+                        supabase.table("usuarios").update(
+                            {
+                                "puede_cerrar_turno": np_cerrar_turno,
+                                "puede_falta_general": np_falta_general,
+                                "puede_ver_dashboard": np_ver_dashboard,
+                                "puede_editar_revision": np_editar_revision,
+                                "puede_cargar_trabajadores": np_cargar_trabajadores,
+                                "puede_crear_areas": np_crear_areas,
+                            }
+                        ).eq("id", u["id"]).execute()
+                        registrar_log(usuario, "Cambió permisos de usuario", u["nombre_usuario"])
+                        st.session_state[mostrar_permisos_key] = False
+                        st.success("Permisos actualizados.")
+                        st.rerun()
 
         delete_key = f"confirm_delete_usuario_{u['id']}"
         if delete_key not in st.session_state:
@@ -1722,7 +1813,9 @@ else:
     st.sidebar.caption(f"Rol: {usuario_actual['rol']}")
     st.sidebar.markdown("---")
 
-    opciones = ["📋 Panel Diario", "📊 Dashboard", "⚙️ Mi cuenta"]
+    opciones = ["📋 Panel Diario", "⚙️ Mi cuenta"]
+    if tiene_permiso(usuario_actual, "puede_ver_dashboard"):
+        opciones.insert(1, "📊 Dashboard")
     if usuario_actual["rol"] == "admin_general":
         opciones += [
             "📍 Sedes",
@@ -1733,6 +1826,11 @@ else:
             "🔑 Usuarios",
             "🕵️ Auditoría",
         ]
+    else:
+        if tiene_permiso(usuario_actual, "puede_cargar_trabajadores"):
+            opciones.append("👥 Trabajadores")
+        if tiene_permiso(usuario_actual, "puede_crear_areas"):
+            opciones.append("🏷️ Áreas")
 
     seleccion = st.sidebar.radio("Menú", opciones)
 
