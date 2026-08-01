@@ -1495,12 +1495,15 @@ def admin_usuarios(usuario):
 
     st.subheader("Usuarios registrados")
     usuarios_lista = supabase.table("usuarios").select("*").order("nombre_completo").execute().data
+    admins_activos = sum(1 for x in usuarios_lista if x["rol"] == "admin_general" and x["activo"])
 
     for u in usuarios_lista:
-        c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 1, 1, 1, 1])
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 2, 1, 1, 1, 1, 1])
         c1.write(u["nombre_completo"])
         c2.write(u["rol"])
         c3.write("🟢" if u["activo"] else "🔴")
+
+        es_ultimo_admin_activo = u["rol"] == "admin_general" and u["activo"] and admins_activos <= 1
 
         confirm_key = f"confirm_toggle_usuario_{u['id']}"
         if confirm_key not in st.session_state:
@@ -1510,6 +1513,8 @@ def admin_usuarios(usuario):
             if c4.button("Activar/Desactivar", key=f"toggle_usuario_{u['id']}"):
                 if u["id"] == usuario["id"]:
                     st.error("No puedes desactivarte a ti mismo.")
+                elif es_ultimo_admin_activo:
+                    st.error("No puedes desactivar al único Administrador General activo.")
                 else:
                     st.session_state[confirm_key] = True
                     st.rerun()
@@ -1592,6 +1597,49 @@ def admin_usuarios(usuario):
                     st.session_state[mostrar_areas_key] = False
                     st.success("Áreas actualizadas.")
                     st.rerun()
+
+        delete_key = f"confirm_delete_usuario_{u['id']}"
+        if delete_key not in st.session_state:
+            st.session_state[delete_key] = False
+
+        if not st.session_state[delete_key]:
+            if c7.button("🗑️ Eliminar", key=f"btn_delete_usuario_{u['id']}"):
+                if u["id"] == usuario["id"]:
+                    st.error("No puedes eliminarte a ti mismo.")
+                elif es_ultimo_admin_activo:
+                    st.error("No puedes eliminar al único Administrador General activo.")
+                else:
+                    tiene_evaluaciones = (
+                        supabase.table("evaluaciones").select("id").eq("evaluador_id", u["id"]).limit(1).execute().data
+                    )
+                    tiene_cierres = (
+                        supabase.table("cierres_turno").select("id").eq("evaluador_id", u["id"]).limit(1).execute().data
+                    )
+                    if tiene_evaluaciones or tiene_cierres:
+                        st.error(
+                            f"'{u['nombre_completo']}' tiene historial de registros/cierres y no se puede "
+                            "eliminar (se perdería el rastro de auditoría). Puedes desactivarlo en su lugar."
+                        )
+                    else:
+                        st.session_state[delete_key] = True
+                        st.rerun()
+        else:
+            st.warning(f"¿Seguro que quieres eliminar a **{u['nombre_completo']}**? Esto no se puede deshacer.")
+            cd1, cd2 = st.columns(2)
+            if cd1.button("✅ Sí, eliminar definitivamente", key=f"yes_delete_usuario_{u['id']}"):
+                supabase.table("usuario_areas").delete().eq("usuario_id", u["id"]).execute()
+                # Borra sus propios logs (ej. "Inició sesión") para no chocar con la
+                # llave foránea; el registro de que TÚ lo eliminaste se guarda después,
+                # a tu nombre, no al de la persona eliminada.
+                supabase.table("logs_auditoria").delete().eq("usuario_id", u["id"]).execute()
+                supabase.table("usuarios").delete().eq("id", u["id"]).execute()
+                registrar_log(usuario, "Eliminó usuario", u["nombre_usuario"])
+                st.session_state[delete_key] = False
+                st.success(f"Usuario '{u['nombre_completo']}' eliminado.")
+                st.rerun()
+            if cd2.button("Cancelar", key=f"no_delete_usuario_{u['id']}"):
+                st.session_state[delete_key] = False
+                st.rerun()
 
 
 # =================================================================
