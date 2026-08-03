@@ -262,12 +262,22 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
 
         turno_nombre = turnos_map.get(empleado.get("turno_id"), "Sin turno asignado")
 
-        with st.container(border=True):
+        if amonestaciones_mes or len(errores_mes) >= max_errores:
+            icono_estado = "🔴"
+        elif len(errores_mes) == max_errores - 1:
+            icono_estado = "🟡"
+        else:
+            icono_estado = "🟢"
+
+        titulo = (
+            f"{icono_estado} {empleado['nombre_completo']} — {turno_nombre} — "
+            f"{len(errores_mes)}/{max_errores} errores · {len(amonestaciones_mes)} amonestaciones (este mes)"
+        )
+
+        with st.expander(titulo):
             col_info, col_accion = st.columns([2, 3])
 
             with col_info:
-                st.subheader(empleado["nombre_completo"])
-                st.caption(f"🕒 Turno fijo: **{turno_nombre}**")
                 m1, m2 = st.columns(2)
                 m1.metric("Errores este mes", f"{len(errores_mes)}/{max_errores}")
                 m2.metric("Amonestaciones este mes", len(amonestaciones_mes))
@@ -276,21 +286,21 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                     st.warning(f"⚠️ A 1 error de llegar al tope del mes ({len(errores_mes)}/{max_errores}).")
 
                 if errores_mes:
-                    with st.expander("Ver justificaciones de errores de este mes"):
-                        for e in errores_mes:
-                            evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
-                            cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
-                            st.caption(f"• **[{cat_texto}]** *({e['fecha']} — evaluó: {evaluador_nombre})* — {e['justificacion']}")
-                            if e.get("imagen_url"):
-                                mostrar_evidencia(e["imagen_url"])
+                    st.markdown("**Errores de este mes:**")
+                    for e in errores_mes:
+                        evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
+                        cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
+                        st.caption(f"• **[{cat_texto}]** *({e['fecha']} — evaluó: {evaluador_nombre})* — {e['justificacion']}")
+                        if e.get("imagen_url"):
+                            mostrar_evidencia(e["imagen_url"])
                 if amonestaciones_mes:
-                    with st.expander("Ver amonestaciones graves de este mes"):
-                        for e in amonestaciones_mes:
-                            evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
-                            cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
-                            st.caption(f"⚠️ **[{cat_texto}]** *({e['fecha']} — evaluó: {evaluador_nombre})* — {e['justificacion']}")
-                            if e.get("imagen_url"):
-                                mostrar_evidencia(e["imagen_url"])
+                    st.markdown("**Amonestaciones graves de este mes:**")
+                    for e in amonestaciones_mes:
+                        evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
+                        cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
+                        st.caption(f"⚠️ **[{cat_texto}]** *({e['fecha']} — evaluó: {evaluador_nombre})* — {e['justificacion']}")
+                        if e.get("imagen_url"):
+                            mostrar_evidencia(e["imagen_url"])
 
             with col_accion:
                 puede_error_estandar = len(errores_mes) < max_errores
@@ -384,7 +394,18 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                 )
                                 st.rerun()
 
-                with st.expander("🔴 Registrar amonestación grave directa (falta grave inmediata)"):
+                st.markdown("---")
+                directa_key = f"mostrar_directa_{empleado['id']}"
+                if directa_key not in st.session_state:
+                    st.session_state[directa_key] = False
+                if st.button(
+                    "🔴 Registrar amonestación grave directa (falta grave inmediata)",
+                    key=f"btn_directa_{empleado['id']}",
+                ):
+                    st.session_state[directa_key] = not st.session_state[directa_key]
+                    st.rerun()
+
+                if st.session_state[directa_key]:
                     with st.form(key=f"form_grave_directa_{empleado['id']}", clear_on_submit=True):
                         categoria_sel = st.selectbox(
                             "Tipo de falta", opciones_categoria, key=f"cat_directa_{empleado['id']}"
@@ -423,6 +444,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                     "Registró amonestación grave directa",
                                     f"{empleado['nombre_completo']} ({area['nombre']}): {justificacion_directa.strip()}",
                                 )
+                                st.session_state[directa_key] = False
                                 st.rerun()
 
     st.markdown("---")
