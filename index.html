@@ -553,11 +553,11 @@ function renderResumen(){
     a.categoria.localeCompare(b.categoria) || a.nombre.localeCompare(b.nombre));
 
   html += `<table class="user-table">
-    <tr><th>Área</th><th>Plato</th><th>Costo por porción</th><th>Precio de venta</th><th>Food cost</th><th>Última modificación</th></tr>`;
+    <tr><th>Área</th><th>Plato</th><th>Costo por porción</th><th>Precio de venta</th><th>Food cost</th><th>Margen contribución</th><th>Última modificación</th></tr>`;
   let lastCat = null;
   sorted.forEach(r => {
     if(r.categoria !== lastCat){
-      html += `<tr class="resumen-cat-row"><td colspan="6">${escapeHtml(r.categoria)}</td></tr>`;
+      html += `<tr class="resumen-cat-row"><td colspan="7">${escapeHtml(r.categoria)}</td></tr>`;
       lastCat = r.categoria;
     }
     const t = computeTotals(r);
@@ -568,8 +568,9 @@ function renderResumen(){
       <td class="mono">${money(t.costoPorPorcion)}</td>
       ${r.seVende ? `
       <td class="mono">${money(t.precioVenta)}</td>
-      <td><span class="fc-badge ${fcClass}">${t.foodCostPct.toFixed(1)}%</span></td>` : `
-      <td colspan="2" style="color:var(--muted);font-size:12px;">No se vende (insumo interno)</td>`}
+      <td><span class="fc-badge ${fcClass}">${t.foodCostPct.toFixed(1)}%</span></td>
+      <td class="mono" style="color:var(--gold);">${money(t.margenContribucion)}</td>` : `
+      <td colspan="3" style="color:var(--muted);font-size:12px;">No se vende (insumo interno)</td>`}
       <td style="font-size:11.5px;color:var(--muted);">${r.modificadoPor ? `${escapeHtml(r.modificadoPor)}, ${fechaHora(r.modificadoEn)}` : (r.creadoPor ? `${escapeHtml(r.creadoPor)}, ${fechaHora(r.creadoEn)}` : '\u2014')}</td>
     </tr>`;
   });
@@ -1270,7 +1271,12 @@ function computeTotals(r){
   const foodCostPct = precioVenta > 0 ? (costoPorPorcion / precioVenta) * 100 : 0;
   const margenPct = 100 - foodCostPct;
   const gananciaPorPorcion = precioVenta - costoPorPorcion;
-  return {costoTotal, costoPorPorcion, multiplicador, multiplicadorEfectivo, precioVenta, foodCostPct, margenPct, gananciaPorPorcion, usaManual};
+  // Margen de contribución: lo que queda del precio de venta después de cubrir el
+  // costo de los insumos de esa porción. Es la misma cifra que la ganancia por
+  // porción, con el nombre que se usa habitualmente en gestión de costos.
+  const margenContribucion = gananciaPorPorcion;
+  const margenContribucionTotal = margenContribucion * porciones;
+  return {costoTotal, costoPorPorcion, multiplicador, multiplicadorEfectivo, precioVenta, foodCostPct, margenPct, gananciaPorPorcion, usaManual, margenContribucion, margenContribucionTotal};
 }
 
 /* ---------------- EDITOR ---------------- */
@@ -1438,6 +1444,8 @@ function renderEditor(){
           <div class="stat-row"><span>${totals.usaManual ? 'Precio de venta (manual)' : 'Precio de venta sugerido'}</span><span id="stat-precio-venta">${money(totals.precioVenta)}</span></div>
           <div class="stat-row"><span>Food cost %</span><span id="stat-food-cost">${totals.foodCostPct.toFixed(1)}%</span></div>
           <div class="stat-row"><span>${r.usaPorciones ? 'Ganancia por porción' : 'Ganancia'}</span><span id="stat-ganancia">${money(totals.gananciaPorPorcion)}</span></div>
+          <div class="stat-row"><span>Margen de contribución${r.usaPorciones ? ' por porción' : ''}</span><span id="stat-margen-contribucion">${money(totals.margenContribucion)}</span></div>
+          ${r.usaPorciones ? `<div class="stat-row"><span>Margen de contribución total (${r.porciones} porciones)</span><span id="stat-margen-contribucion-total">${money(totals.margenContribucionTotal)}</span></div>` : ''}
           </div>
         </div>
         ${!r.seVende ? '<p class="dim" style="font-size:12px;color:var(--muted);margin-top:10px;">Como no se vende directamente, no aplica precio de venta ni food cost — solo su costo, para usarla dentro de otras recetas.</p>' : ''}
@@ -1705,6 +1713,8 @@ function refreshComputedUI(){
   setText('stat-precio-venta', money(totals.precioVenta));
   setText('stat-food-cost', totals.foodCostPct.toFixed(1) + '%');
   setText('stat-ganancia', money(totals.gananciaPorPorcion));
+  setText('stat-margen-contribucion', money(totals.margenContribucion));
+  setText('stat-margen-contribucion-total', money(totals.margenContribucionTotal));
 
   const multEl = document.getElementById('ed-multiplicador');
   const margEl = document.getElementById('ed-margen');
