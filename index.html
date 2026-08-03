@@ -875,20 +875,44 @@ function setRecipeViewMode(mode){
   renderMain();
 }
 
+let editingUserPasswordFor = null;
+
 function renderUsersTab(){
   let html = `<div class="toolbar"><h2>Usuarios</h2></div>`;
   html += `<table class="user-table"><tr><th>Usuario</th><th>Rol</th><th></th></tr>`;
   appData.users.forEach(u => {
     html += `<tr>
-      <td>${escapeHtml(u.usuario)}</td>
+      <td>${escapeHtml(u.usuario)} ${u.usuario === currentUser.usuario ? '<span style="color:var(--muted);font-size:11.5px;">(tú)</span>' : ''}</td>
       <td><span class="role-badge role-${u.rol}">${u.rol}</span></td>
       <td style="text-align:right;">
-        ${u.usuario !== currentUser.usuario ? `<button class="btn btn-danger" onclick="deleteUser('${escapeAttr(u.usuario)}')">Eliminar</button>` : '<span style="color:var(--muted);font-size:12px;">tú</span>'}
+        <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px;" onclick="editUserStart('${escapeAttr(u.usuario)}')">Cambiar clave / rol</button>
+        ${u.usuario !== currentUser.usuario ? `<button class="btn btn-danger" style="padding:5px 10px;font-size:12px;" onclick="deleteUser('${escapeAttr(u.usuario)}')">Eliminar</button>` : ''}
       </td>
     </tr>`;
   });
   html += `</table>`;
-  html += `<div class="add-user-form">
+
+  if(editingUserPasswordFor){
+    const u = appData.users.find(x => x.usuario === editingUserPasswordFor);
+    html += `<div class="add-user-form" style="flex-wrap:wrap;margin-top:16px;">
+      <div class="field"><label>Editando a</label>
+        <div style="padding:10px 0;font-weight:600;">${escapeHtml(editingUserPasswordFor)}</div>
+      </div>
+      <div class="field"><label>Nueva clave (dejar vacío para no cambiarla)</label>
+        <input id="eu-clave" type="password" placeholder="nueva clave"></div>
+      <div class="field"><label>Rol</label>
+        <select id="eu-rol">
+          <option value="admin" ${u.rol==='admin'?'selected':''}>admin</option>
+          <option value="chef" ${u.rol==='chef'?'selected':''}>chef</option>
+          <option value="visualizador" ${u.rol==='visualizador'?'selected':''}>visualizador</option>
+        </select>
+      </div>
+      <button class="btn btn-gold" onclick="saveUserChanges()">Guardar</button>
+      <button class="btn btn-ghost" onclick="cancelEditUser()">Cancelar</button>
+    </div>`;
+  }
+
+  html += `<div class="add-user-form" style="margin-top:16px;">
     <div class="field"><label>Usuario</label><input id="nu-usuario" placeholder="nombre"></div>
     <div class="field"><label>Clave</label><input id="nu-clave" type="password" placeholder="clave"></div>
     <div class="field"><label>Rol</label>
@@ -901,6 +925,54 @@ function renderUsersTab(){
     <button class="btn btn-gold" onclick="addUser()">Agregar</button>
   </div>`;
   return html;
+}
+
+function editUserStart(usuario){
+  editingUserPasswordFor = usuario;
+  renderMain();
+}
+
+function cancelEditUser(){
+  editingUserPasswordFor = null;
+  renderMain();
+}
+
+async function saveUserChanges(){
+  const usuario = editingUserPasswordFor;
+  const nuevaClave = document.getElementById('eu-clave').value;
+  const nuevoRol = document.getElementById('eu-rol').value;
+
+  if(nuevaClave && nuevaClave.length < 4){
+    alert('La clave debe tener al menos 4 caracteres.');
+    return;
+  }
+  if(usuario === currentUser.usuario && nuevoRol !== 'admin'){
+    const otrosAdmins = appData.users.filter(u => u.usuario !== usuario && u.rol === 'admin').length;
+    if(otrosAdmins === 0){
+      alert('No podés quitarte el rol admin si sos el único administrador. Creá otro admin primero.');
+      return;
+    }
+  }
+
+  const payload = {rol: nuevoRol};
+  if(nuevaClave){
+    payload.password_hash = dcodeIO.bcrypt.hashSync(nuevaClave, 10);
+  }
+  if(!confirm(`¿Guardar los cambios para "${usuario}"?`)) return;
+
+  const {error} = await sb.from('usuarios').update(payload).eq('usuario', usuario);
+  if(error){ alert('No se pudo guardar: ' + error.message); return; }
+
+  if(usuario === currentUser.usuario){
+    currentUser.rol = nuevoRol;
+    document.getElementById('role-badge').textContent = nuevoRol;
+    document.getElementById('role-badge').className = 'role-badge role-' + nuevoRol;
+  }
+  editingUserPasswordFor = null;
+  await refresh();
+  if(nuevaClave){
+    alert('Listo. La clave se actualizó — la próxima vez que ese usuario ingrese, va a usar la clave nueva.');
+  }
 }
 
 async function addUser(){
