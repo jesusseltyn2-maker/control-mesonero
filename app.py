@@ -51,7 +51,7 @@ if "usuario" not in st.session_state:
 # HELPERS
 # =================================================================
 def cargar_sedes(supabase, solo_activas=True):
-    q = supabase.table("sedes").select("*").order("nombre")
+    q = supabase.table("sedes").select("*").order("orden")
     if solo_activas:
         q = q.eq("activo", True)
     return q.execute().data
@@ -1330,6 +1330,10 @@ def admin_sedes(usuario):
 
     with st.form("nueva_sede", clear_on_submit=True):
         nombre = st.text_input("Nombre de la sede (ej. Costa América, Aeropuerto)")
+        orden = st.number_input(
+            "Orden (la de menor número aparece primero seleccionada en el Panel Diario)",
+            min_value=1, max_value=20, value=1, step=1,
+        )
         submit = st.form_submit_button("➕ Agregar sede")
         if submit:
             if not nombre.strip():
@@ -1339,22 +1343,42 @@ def admin_sedes(usuario):
                 if existe:
                     st.error("Ya existe una sede con ese nombre.")
                 else:
-                    supabase.table("sedes").insert({"nombre": nombre.strip()}).execute()
+                    supabase.table("sedes").insert({"nombre": nombre.strip(), "orden": int(orden)}).execute()
                     registrar_log(usuario, "Agregó sede", nombre.strip())
                     st.success(f"Sede '{nombre.strip()}' agregada.")
                     st.rerun()
 
     st.subheader("Sedes registradas")
-    sedes = supabase.table("sedes").select("*").order("nombre").execute().data
+    sedes = supabase.table("sedes").select("*").order("orden").execute().data
 
     for s in sedes:
-        c1, c2, c3 = st.columns([3, 1, 1])
-        c1.write(s["nombre"])
+        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+        c1.write(f"{s['nombre']} (orden: {s.get('orden', 1)})")
         c2.write("🟢 Activa" if s["activo"] else "🔴 Inactiva")
-        if c3.button("Activar/Desactivar", key=f"toggle_sede_{s['id']}"):
+
+        edit_key = f"edit_sede_{s['id']}"
+        if edit_key not in st.session_state:
+            st.session_state[edit_key] = False
+        if c3.button("Editar orden", key=f"btn_edit_sede_{s['id']}"):
+            st.session_state[edit_key] = not st.session_state[edit_key]
+            st.rerun()
+        if c4.button("Activar/Desactivar", key=f"toggle_sede_{s['id']}"):
             supabase.table("sedes").update({"activo": not s["activo"]}).eq("id", s["id"]).execute()
             registrar_log(usuario, "Cambió estado de sede", s["nombre"])
             st.rerun()
+
+        if st.session_state[edit_key]:
+            with st.form(key=f"form_orden_sede_{s['id']}"):
+                nuevo_orden = st.number_input(
+                    f"Nuevo orden para '{s['nombre']}' (1 = primera en aparecer)",
+                    min_value=1, max_value=20, value=s.get("orden", 1), step=1,
+                    key=f"orden_edit_{s['id']}",
+                )
+                if st.form_submit_button("💾 Guardar orden"):
+                    supabase.table("sedes").update({"orden": int(nuevo_orden)}).eq("id", s["id"]).execute()
+                    registrar_log(usuario, "Cambió orden de sede", f"{s['nombre']}: {nuevo_orden}")
+                    st.session_state[edit_key] = False
+                    st.rerun()
 
 
 def admin_areas(usuario):
