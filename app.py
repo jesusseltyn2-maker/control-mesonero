@@ -1098,6 +1098,61 @@ def dashboard(usuario):
     st.divider()
 
     # -------------------------------------------------------------
+    # 🗂️ Detalle de faltas por tipo (categoría), agrupado por trabajador debajo
+    # -------------------------------------------------------------
+    st.markdown("#### 🗂️ Detalle de faltas por tipo (con estos filtros)")
+    if df.empty:
+        st.caption("No hay faltas registradas con estos filtros.")
+    else:
+        st.caption("Haz clic en cada tipo de falta para ver qué trabajadores la tuvieron y el motivo de cada una.")
+        resumen_por_categoria = (
+            df.groupby("categoria")
+            .agg(
+                total=("categoria", "count"),
+                errores=("tipo", lambda s: (s == "error_estandar").sum()),
+                amonestaciones=("tipo", lambda s: (s == "amonestacion_grave").sum()),
+            )
+            .reset_index()
+            .sort_values("total", ascending=False)
+        )
+
+        for _, fila in resumen_por_categoria.iterrows():
+            categoria_nombre = fila["categoria"]
+            titulo_categoria = (
+                f"{categoria_nombre} — {fila['total']} falta(s) total "
+                f"({fila['errores']} errores · {fila['amonestaciones']} amonestaciones)"
+            )
+            with st.expander(titulo_categoria):
+                registros_categoria = df[df["categoria"] == categoria_nombre]
+                trabajadores_con_esta_falta = (
+                    registros_categoria.groupby("trabajador")
+                    .agg(area=("area", "first"), veces=("categoria", "count"))
+                    .reset_index()
+                    .sort_values("veces", ascending=False)
+                )
+                for _, fila_trab in trabajadores_con_esta_falta.iterrows():
+                    nombre_persona = fila_trab["trabajador"]
+                    st.markdown(f"**👤 {nombre_persona}** ({fila_trab['area']}) — {fila_trab['veces']} vez/veces")
+                    registros_persona_cat = registros_categoria[
+                        registros_categoria["trabajador"] == nombre_persona
+                    ].sort_values("fecha", ascending=False)
+                    for _, r in registros_persona_cat.iterrows():
+                        tipo_texto = "Error estándar" if r["tipo"] == "error_estandar" else "Amonestación grave"
+                        icono = "🔸" if r["tipo"] == "error_estandar" else "🚨"
+                        pct_texto = (
+                            f" — 💰 bono: {int(r['porcentaje_bono'])}%"
+                            if pd.notna(r.get("porcentaje_bono"))
+                            else ""
+                        )
+                        with st.container(border=True):
+                            st.write(f"{icono} **{r['fecha']}** — {tipo_texto}{pct_texto} — evaluó: *{r['evaluador']}*")
+                            st.caption(r["justificacion"])
+                            if r.get("imagen_url"):
+                                mostrar_evidencia(r["imagen_url"])
+
+    st.divider()
+
+    # -------------------------------------------------------------
     # 📈 Tendencia + 🌟 Reconocimiento
     # -------------------------------------------------------------
     st.markdown("#### 📈 Tendencia en el tiempo (por semana)")
