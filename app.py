@@ -278,6 +278,13 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
         amonestaciones_mes = [e for e in evals_mes if e["tipo"] == "amonestacion_grave"]
         graves_automaticas_mes = [e for e in amonestaciones_mes if e.get("es_grave_automatica")]
 
+        # Suma real de todo lo perdido este mes (automáticas + directas + generales).
+        # El bono no puede perderse más allá del 100%, así que se topa para mostrar,
+        # pero se avisa si la suma REAL ya llegó o superó el 100% (revisión profunda).
+        suma_porcentaje_real = sum(e.get("porcentaje_bono") or 0 for e in amonestaciones_mes)
+        suma_porcentaje_topada = min(100, suma_porcentaje_real)
+        en_tope_bono = suma_porcentaje_real >= 100
+
         # Secuencia: cada "max_errores"-ava falta del mes (estándar + graves
         # automáticas anteriores) se convierte SOLA en amonestación grave.
         # Las directas/generales no cuentan para esta secuencia.
@@ -289,7 +296,9 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
 
         turno_nombre = turnos_map.get(empleado.get("turno_id"), "Sin turno asignado")
 
-        if amonestaciones_mes:
+        if en_tope_bono:
+            icono_estado = "⛔"
+        elif amonestaciones_mes:
             icono_estado = "🔴"
         elif siguiente_es_grave:
             icono_estado = "🟡"
@@ -298,16 +307,29 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
 
         titulo = (
             f"{icono_estado} {empleado['nombre_completo']} — {turno_nombre} — "
-            f"{len(errores_mes)} errores · {len(amonestaciones_mes)} amonestaciones (este mes)"
+            f"{len(errores_mes)} errores · {len(amonestaciones_mes)} amonestaciones "
+            f"· {suma_porcentaje_topada}% bono perdido (este mes)"
         )
 
         with st.expander(titulo):
             col_info, col_accion = st.columns([2, 3])
 
             with col_info:
-                m1, m2 = st.columns(2)
+                if en_tope_bono:
+                    detalle_extra = (
+                        f" (la suma real fue {suma_porcentaje_real}%, pero el máximo posible es 100%)"
+                        if suma_porcentaje_real > 100
+                        else ""
+                    )
+                    st.error(
+                        f"⛔ **{empleado['nombre_completo']} llegó al 100% de pérdida de bono este mes**"
+                        f"{detalle_extra}. Amerita revisión profunda por parte de un Administrador General."
+                    )
+
+                m1, m2, m3 = st.columns(3)
                 m1.metric("Errores este mes", len(errores_mes))
                 m2.metric("Amonestaciones este mes", len(amonestaciones_mes))
+                m3.metric("% bono perdido este mes", f"{suma_porcentaje_topada}%")
 
                 if errores_mes:
                     st.markdown("**Errores de este mes:**")
@@ -904,6 +926,56 @@ def dashboard(usuario):
     k7.metric("👤 Faltas individuales", len(df) - len(faltas_generales_df) if not df.empty else 0)
     top_evaluador = actividad.iloc[0]["evaluador"] if not actividad.empty else "—"
     k8.metric("📝 Evaluador más activo", top_evaluador)
+    st.divider()
+
+    # -------------------------------------------------------------
+    # ⛔ Trabajadores en tope de bono (100%) — SIEMPRE del mes calendario
+    # actual, sin importar el rango de fechas filtrado arriba, porque la
+    # regla del bono es mensual por definición.
+    # -------------------------------------------------------------
+    inicio_mes_actual = hoy_venezuela().replace(day=1).isoformat()
+    fin_mes_actual = hoy_venezuela().isoformat()
+    graves_mes_actual = (
+        supabase.table("evaluaciones")
+        .select("mesonero_id, porcentaje_bono, mesoneros(nombre_completo, areas(nombre))")
+        .eq("tipo", "amonestacion_grave")
+        .gte("fecha", inicio_mes_actual)
+        .lte("fecha", fin_mes_actual)
+        .execute()
+        .data
+    )
+    if graves_mes_actual:
+        df_graves_mes = pd.DataFrame(graves_mes_actual)
+        df_graves_mes["trabajador"] = df_graves_mes["mesoneros"].apply(lambda x: (x or {}).get("nombre_completo", "N/A"))
+        df_graves_mes["area"] = df_graves_mes["mesoneros"].apply(lambda x: ((x or {}).get("areas") or {}).get("nombre", "N/A"))
+        df_graves_mes["porcentaje_bono"] = df_graves_mes["porcentaje_bono"].fillna(0)
+        resumen_bono = (
+            df_graves_mes.groupby(["trabajador", "area"])
+            .agg(suma_real=("porcentaje_bono", "sum"), cantidad=("porcentaje_bono", "count"))
+            .reset_index()
+        )
+        en_tope = resumen_bono[resumen_bono["suma_real"] >= 100].sort_values("suma_real", ascending=False)
+    else:
+        en_tope = pd.DataFrame(columns=["trabajador", "area", "suma_real", "cantidad"])
+
+    if not en_tope.empty:
+        st.error(
+            f"⛔ **{len(en_tope)} trabajador(es) llegaron al 100% de pérdida de bono este mes** "
+            "— ameritan revisión profunda."
+        )
+        tabla_tope = en_tope.copy()
+        tabla_tope["% bono perdido (tope 100%)"] = tabla_tope["suma_real"].clip(upper=100)
+        tabla_tope = tabla_tope.rename(
+            columns={"suma_real": "suma real (%)", "cantidad": "cantidad de amonestaciones"}
+        )
+        st.dataframe(
+            tabla_tope[["trabajador", "area", "cantidad de amonestaciones", "suma real (%)", "% bono perdido (tope 100%)"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.success("✅ Ningún trabajador ha llegado al 100% de pérdida de bono este mes.")
+
     st.divider()
 
     # -------------------------------------------------------------
