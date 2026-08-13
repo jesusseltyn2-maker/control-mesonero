@@ -209,14 +209,38 @@ def panel_diario(usuario):
 
     busqueda = st.text_input("🔍 Buscar trabajador por nombre", placeholder="Escribe un nombre para filtrar...")
 
-    nombres_area = [a["nombre"] for a in areas_sede]
-    area_sel_nombre = st.selectbox("Área", nombres_area, key="area_panel_diario")
-    # Si al cambiar de sede el área recordada ya no existe en esta sede, usar la primera.
-    if area_sel_nombre not in nombres_area:
-        area_sel_nombre = nombres_area[0]
-    area_sel = next(a for a in areas_sede if a["nombre"] == area_sel_nombre)
+    if busqueda.strip():
+        # Con búsqueda activa: recorre TODAS las áreas de la sede (no solo la
+        # seleccionada), mostrando el nombre de cada área donde haya coincidencias.
+        termino = busqueda.strip().lower()
+        hubo_resultado = False
+        for area in areas_sede:
+            ids_check = (
+                supabase.table("mesoneros")
+                .select("id, nombre_completo")
+                .eq("activo", True)
+                .eq("area_id", area["id"])
+                .execute()
+                .data
+            )
+            if any(termino in e["nombre_completo"].lower() for e in ids_check):
+                hubo_resultado = True
+                st.markdown(f"### 📁 {area['nombre']}")
+                _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda)
+        if not hubo_resultado:
+            st.warning(
+                f"No se encontró ningún trabajador activo que coincida con '{busqueda.strip()}' "
+                f"en ninguna área de '{sede_sel_nombre}'."
+            )
+    else:
+        nombres_area = [a["nombre"] for a in areas_sede]
+        area_sel_nombre = st.selectbox("Área", nombres_area, key="area_panel_diario")
+        # Si al cambiar de sede el área recordada ya no existe en esta sede, usar la primera.
+        if area_sel_nombre not in nombres_area:
+            area_sel_nombre = nombres_area[0]
+        area_sel = next(a for a in areas_sede if a["nombre"] == area_sel_nombre)
 
-    _panel_area(usuario, supabase, hoy, area_sel, turnos_map, busqueda)
+        _panel_area(usuario, supabase, hoy, area_sel, turnos_map, busqueda)
 
     st.markdown("---")
     _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede_sel, areas_sede)
