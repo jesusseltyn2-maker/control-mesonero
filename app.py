@@ -87,6 +87,23 @@ def tiene_permiso(usuario, permiso):
     return usuario.get(permiso, True)
 
 
+def calcular_porcentaje_bono(numero_amonestacion_del_mes):
+    """1ra amonestación grave del mes = 25%, 2da = 50%, 3ra en adelante = 100%."""
+    if numero_amonestacion_del_mes <= 1:
+        return 25
+    elif numero_amonestacion_del_mes == 2:
+        return 50
+    return 100
+
+
+OPCIONES_PORCENTAJE_BONO = {
+    "10% — sanción grave, pero no tan grave": 10,
+    "25%": 25,
+    "50%": 50,
+    "100% — se queda sin bono": 100,
+}
+
+
 def selector_evidencia(key_prefix):
     """Selector único de evidencia (foto o video). No usamos radio +
     widget condicional porque dentro de un st.form los widgets
@@ -298,7 +315,8 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                     for e in amonestaciones_mes:
                         evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
                         cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
-                        st.caption(f"⚠️ **[{cat_texto}]** *({e['fecha']} — evaluó: {evaluador_nombre})* — {e['justificacion']}")
+                        pct_texto = f" — 💰 bono: {e['porcentaje_bono']}%" if e.get("porcentaje_bono") is not None else ""
+                        st.caption(f"⚠️ **[{cat_texto}]** *({e['fecha']} — evaluó: {evaluador_nombre})* — {e['justificacion']}{pct_texto}")
                         if e.get("imagen_url"):
                             mostrar_evidencia(e["imagen_url"])
 
@@ -352,6 +370,12 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                         f"errores estándar este mes en '{area['nombre']}'. El próximo registro debe ser "
                         "una amonestación grave."
                     )
+                    numero_amonestacion = len(amonestaciones_mes) + 1
+                    porcentaje_bono = calcular_porcentaje_bono(numero_amonestacion)
+                    st.error(
+                        f"💰 Esta sería la amonestación grave **#{numero_amonestacion}** de "
+                        f"{empleado['nombre_completo']} este mes → afecta el bono en **{porcentaje_bono}%**."
+                    )
                     with st.form(key=f"form_grave_auto_{empleado['id']}", clear_on_submit=True):
                         categoria_sel = st.selectbox(
                             "Tipo de falta", opciones_categoria, key=f"cat_grave_auto_{empleado['id']}"
@@ -385,12 +409,14 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                         "categoria_id": categoria_id,
                                         "justificacion": justificacion.strip(),
                                         "imagen_url": imagen_url,
+                                        "porcentaje_bono": porcentaje_bono,
                                     }
                                 ).execute()
                                 registrar_log(
                                     usuario,
                                     "Registró amonestación grave (por exceso de errores)",
-                                    f"{empleado['nombre_completo']} ({area['nombre']}): {justificacion.strip()}",
+                                    f"{empleado['nombre_completo']} ({area['nombre']}): {justificacion.strip()} "
+                                    f"[afecta bono {porcentaje_bono}%]",
                                 )
                                 st.rerun()
 
@@ -410,6 +436,11 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                         categoria_sel = st.selectbox(
                             "Tipo de falta", opciones_categoria, key=f"cat_directa_{empleado['id']}"
                         )
+                        nivel_sel = st.selectbox(
+                            "Nivel de sanción (afecta el bono)",
+                            list(OPCIONES_PORCENTAJE_BONO.keys()),
+                            key=f"nivel_directa_{empleado['id']}",
+                        )
                         justificacion_directa = st.text_area(
                             "Justificación obligatoria", key=f"just_directa_{empleado['id']}", height=70
                         )
@@ -427,6 +458,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                 categoria_id = (
                                     None if categoria_sel == OPCION_OTRO else categoria_id_por_nombre.get(categoria_sel)
                                 )
+                                porcentaje_bono_directa = OPCIONES_PORCENTAJE_BONO[nivel_sel]
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
@@ -437,12 +469,14 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                         "categoria_id": categoria_id,
                                         "justificacion": justificacion_directa.strip(),
                                         "imagen_url": imagen_url,
+                                        "porcentaje_bono": porcentaje_bono_directa,
                                     }
                                 ).execute()
                                 registrar_log(
                                     usuario,
                                     "Registró amonestación grave directa",
-                                    f"{empleado['nombre_completo']} ({area['nombre']}): {justificacion_directa.strip()}",
+                                    f"{empleado['nombre_completo']} ({area['nombre']}): {justificacion_directa.strip()} "
+                                    f"[afecta bono {porcentaje_bono_directa}%]",
                                 )
                                 st.session_state[directa_key] = False
                                 st.rerun()
@@ -476,6 +510,11 @@ def _seccion_falta_general(
             )
             tipo_sel = st.radio(
                 "Tipo", ["Error estándar", "Amonestación grave"], key=f"tipo_general_{area['id']}", horizontal=True
+            )
+            nivel_sel = st.selectbox(
+                "Si elegiste 'Amonestación grave': nivel de sanción (afecta el bono)",
+                list(OPCIONES_PORCENTAJE_BONO.keys()),
+                key=f"nivel_general_{area['id']}",
             )
             categoria_sel = st.selectbox("Tipo de falta", opciones_categoria, key=f"cat_general_{area['id']}")
             justificacion = st.text_area(
@@ -522,6 +561,7 @@ def _seccion_falta_general(
 
                         aplicados = 0
                         convertidos_a_grave = 0
+                        graves_aplicadas = []
                         inicio_mes = hoy[:8] + "01"
                         for empleado in empleados_turno:
                             tipo_final = tipo_base
@@ -542,6 +582,26 @@ def _seccion_falta_general(
                                     tipo_final = "amonestacion_grave"
                                     convertidos_a_grave += 1
 
+                            porcentaje_bono = None
+                            if tipo_final == "amonestacion_grave":
+                                if tipo_base == "amonestacion_grave":
+                                    # Grave elegida directamente por el evaluador: usa el nivel manual.
+                                    porcentaje_bono = OPCIONES_PORCENTAJE_BONO[nivel_sel]
+                                else:
+                                    # Convertida automáticamente por exceso de errores: sigue la secuencia 25/50/100.
+                                    amonestaciones_existentes = len(
+                                        supabase.table("evaluaciones")
+                                        .select("id")
+                                        .eq("mesonero_id", empleado["id"])
+                                        .gte("fecha", inicio_mes)
+                                        .lte("fecha", hoy)
+                                        .eq("tipo", "amonestacion_grave")
+                                        .execute()
+                                        .data
+                                    )
+                                    porcentaje_bono = calcular_porcentaje_bono(amonestaciones_existentes + 1)
+                                graves_aplicadas.append((empleado["nombre_completo"], porcentaje_bono))
+
                             supabase.table("evaluaciones").insert(
                                 {
                                     "fecha": hoy,
@@ -552,6 +612,7 @@ def _seccion_falta_general(
                                     "categoria_id": categoria_id,
                                     "justificacion": f"[Falta general del turno] {justificacion.strip()}",
                                     "imagen_url": imagen_url,
+                                    "porcentaje_bono": porcentaje_bono,
                                 }
                             ).execute()
                             aplicados += 1
@@ -571,6 +632,9 @@ def _seccion_falta_general(
                                 "registró como amonestación grave.)"
                             )
                         st.success(mensaje)
+                        if graves_aplicadas:
+                            detalle_graves = ", ".join(f"{nombre} ({pct}%)" for nombre, pct in graves_aplicadas)
+                            st.info(f"💰 Afectación al bono por persona: {detalle_graves}")
                         st.rerun()
 
 
@@ -659,12 +723,13 @@ def _seccion_cierre_turno(usuario, supabase, hoy, turnos_catalogo, sede, areas_s
                 categoria_texto = (h.get("categorias_falta") or {}).get("nombre", "Otro")
                 tipo_texto = "Error estándar" if h["tipo"] == "error_estandar" else "Amonestación grave"
                 icono = "🔸" if h["tipo"] == "error_estandar" else "🚨"
+                pct_texto = f" — 💰 bono: {h['porcentaje_bono']}%" if h.get("porcentaje_bono") is not None else ""
 
                 with st.container(border=True):
                     col_texto, col_btn = st.columns([4, 1])
                     col_texto.write(
                         f"{icono} **{empleado_nombre}** ({area_nombre}) — {tipo_texto} — "
-                        f"**[{categoria_texto}]** — evaluó: *{evaluador_nombre}*"
+                        f"**[{categoria_texto}]**{pct_texto} — evaluó: *{evaluador_nombre}*"
                     )
                     col_texto.caption(h["justificacion"])
                     if h.get("imagen_url"):
@@ -780,7 +845,7 @@ def dashboard(usuario):
             "no depende de este rango."
         )
         df = pd.DataFrame(
-            columns=["fecha", "trabajador", "area", "evaluador", "tipo", "categoria", "justificacion", "imagen_url"]
+            columns=["fecha", "trabajador", "area", "evaluador", "tipo", "categoria", "justificacion", "porcentaje_bono", "imagen_url"]
         )
     else:
         df = pd.DataFrame(evaluaciones)
@@ -942,8 +1007,8 @@ def dashboard(usuario):
 
     with st.expander("Ver detalle completo (todas las justificaciones)"):
         detalle = df[
-            ["fecha", "trabajador", "area", "tipo", "categoria", "evaluador", "justificacion", "imagen_url"]
-        ].rename(columns={"imagen_url": "foto"}).sort_values("fecha", ascending=False)
+            ["fecha", "trabajador", "area", "tipo", "categoria", "evaluador", "justificacion", "porcentaje_bono", "imagen_url"]
+        ].rename(columns={"imagen_url": "foto", "porcentaje_bono": "% bono"}).sort_values("fecha", ascending=False)
         st.dataframe(
             detalle,
             use_container_width=True,
@@ -963,8 +1028,8 @@ def dashboard(usuario):
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             df[
-                ["fecha", "trabajador", "area", "tipo", "categoria", "evaluador", "justificacion", "imagen_url"]
-            ].rename(columns={"imagen_url": "foto"}).sort_values("fecha").to_excel(
+                ["fecha", "trabajador", "area", "tipo", "categoria", "evaluador", "justificacion", "porcentaje_bono", "imagen_url"]
+            ].rename(columns={"imagen_url": "foto", "porcentaje_bono": "% bono"}).sort_values("fecha").to_excel(
                 writer, sheet_name="Detalle", index=False
             )
             ranking_errores.to_excel(writer, sheet_name="Ranking Errores", index=False)
@@ -1041,8 +1106,9 @@ def dashboard(usuario):
             )
             df_hist["foto"] = df_hist.get("imagen_url", pd.Series(dtype=str))
             df_hist["hora exacta"] = convertir_columna_a_hora_venezuela(df_hist["created_at"])
+            df_hist["% bono"] = df_hist.get("porcentaje_bono", pd.Series(dtype="Int64"))
             tabla_hist = df_hist[
-                ["fecha", "tipo_texto", "categoria", "evaluador", "justificacion", "foto", "hora exacta"]
+                ["fecha", "tipo_texto", "categoria", "evaluador", "justificacion", "% bono", "foto", "hora exacta"]
             ].rename(columns={"tipo_texto": "tipo"})
             st.dataframe(
                 tabla_hist,
@@ -1068,9 +1134,10 @@ def dashboard(usuario):
                 categoria_texto = (h.get("categorias_falta") or {}).get("nombre", "Otro")
                 tipo_texto = "Error estándar" if h["tipo"] == "error_estandar" else "Amonestación grave"
                 icono = "🔸" if h["tipo"] == "error_estandar" else "🚨"
+                pct_texto = f" — 💰 bono: {h['porcentaje_bono']}%" if h.get("porcentaje_bono") is not None else ""
 
                 with st.container(border=True):
-                    st.write(f"{icono} **{h['fecha']}** — {tipo_texto} — **[{categoria_texto}]** — evaluó: *{evaluador_nombre}*")
+                    st.write(f"{icono} **{h['fecha']}** — {tipo_texto} — **[{categoria_texto}]**{pct_texto} — evaluó: *{evaluador_nombre}*")
                     st.caption(h["justificacion"])
                     if h.get("imagen_url"):
                         mostrar_evidencia(h["imagen_url"])
