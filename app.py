@@ -276,19 +276,29 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
         evals_mes = evals_por_empleado.get(empleado["id"], [])
         errores_mes = [e for e in evals_mes if e["tipo"] == "error_estandar"]
         amonestaciones_mes = [e for e in evals_mes if e["tipo"] == "amonestacion_grave"]
+        graves_automaticas_mes = [e for e in amonestaciones_mes if e.get("es_grave_automatica")]
+
+        # Secuencia: cada "max_errores"-ava falta del mes (estándar + graves
+        # automáticas anteriores) se convierte SOLA en amonestación grave.
+        # Las directas/generales no cuentan para esta secuencia.
+        secuencia_previa = len(errores_mes) + len(graves_automaticas_mes)
+        numero_siguiente = secuencia_previa + 1
+        siguiente_es_grave = numero_siguiente % max_errores == 0
+        numero_grave_siguiente = numero_siguiente // max_errores
+        porcentaje_siguiente = calcular_porcentaje_bono(numero_grave_siguiente) if siguiente_es_grave else None
 
         turno_nombre = turnos_map.get(empleado.get("turno_id"), "Sin turno asignado")
 
-        if amonestaciones_mes or len(errores_mes) >= max_errores:
+        if amonestaciones_mes:
             icono_estado = "🔴"
-        elif len(errores_mes) == max_errores - 1:
+        elif siguiente_es_grave:
             icono_estado = "🟡"
         else:
             icono_estado = "🟢"
 
         titulo = (
             f"{icono_estado} {empleado['nombre_completo']} — {turno_nombre} — "
-            f"{len(errores_mes)}/{max_errores} errores · {len(amonestaciones_mes)} amonestaciones (este mes)"
+            f"{len(errores_mes)} errores · {len(amonestaciones_mes)} amonestaciones (este mes)"
         )
 
         with st.expander(titulo):
@@ -296,11 +306,8 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
 
             with col_info:
                 m1, m2 = st.columns(2)
-                m1.metric("Errores este mes", f"{len(errores_mes)}/{max_errores}")
+                m1.metric("Errores este mes", len(errores_mes))
                 m2.metric("Amonestaciones este mes", len(amonestaciones_mes))
-
-                if len(errores_mes) == max_errores - 1:
-                    st.warning(f"⚠️ A 1 error de llegar al tope del mes ({len(errores_mes)}/{max_errores}).")
 
                 if errores_mes:
                     st.markdown("**Errores de este mes:**")
@@ -316,36 +323,65 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                         evaluador_nombre = (e.get("usuarios") or {}).get("nombre_completo", "N/D")
                         cat_texto = categorias_map.get(e.get("categoria_id"), "Otro")
                         pct_texto = f" — 💰 bono: {e['porcentaje_bono']}%" if e.get("porcentaje_bono") is not None else ""
-                        st.caption(f"⚠️ **[{cat_texto}]** *({e['fecha']} — evaluó: {evaluador_nombre})* — {e['justificacion']}{pct_texto}")
+                        origen_texto = " (automática)" if e.get("es_grave_automatica") else ""
+                        st.caption(f"⚠️ **[{cat_texto}]** *({e['fecha']} — evaluó: {evaluador_nombre})* — {e['justificacion']}{pct_texto}{origen_texto}")
                         if e.get("imagen_url"):
                             mostrar_evidencia(e["imagen_url"])
 
             with col_accion:
-                puede_error_estandar = len(errores_mes) < max_errores
+                if siguiente_es_grave:
+                    st.error(
+                        f"🚨 Esta será la falta **#{numero_siguiente}** de {empleado['nombre_completo']} "
+                        f"este mes → se registra AUTOMÁTICAMENTE como amonestación grave "
+                        f"(nivel {numero_grave_siguiente}) → afecta el bono en **{porcentaje_siguiente}%**."
+                    )
+                else:
+                    st.info(f"Esta será la falta #{numero_siguiente} de {empleado['nombre_completo']} este mes (error estándar).")
 
-                if puede_error_estandar:
-                    with st.form(key=f"form_std_{empleado['id']}", clear_on_submit=True):
-                        st.write("Registrar **error estándar**")
-                        categoria_sel = st.selectbox(
-                            "Tipo de falta", opciones_categoria, key=f"cat_std_{empleado['id']}"
-                        )
-                        justificacion = st.text_area(
-                            "Justificación obligatoria", key=f"just_std_{empleado['id']}", height=70
-                        )
-                        foto = selector_evidencia(f"std_{empleado['id']}")
-                        if st.form_submit_button("➕ Registrar error"):
-                            if not justificacion.strip():
-                                st.error("La justificación es obligatoria.")
-                            else:
-                                imagen_url = None
-                                if foto is not None:
-                                    try:
-                                        imagen_url = subir_evidencia(supabase, empleado["id"], foto)
-                                    except Exception as e:
-                                        st.warning(f"El registro se guardó, pero la foto no se pudo subir: {e}")
-                                categoria_id = (
-                                    None if categoria_sel == OPCION_OTRO else categoria_id_por_nombre.get(categoria_sel)
+                with st.form(key=f"form_falta_{empleado['id']}", clear_on_submit=True):
+                    categoria_sel = st.selectbox(
+                        "Tipo de falta", opciones_categoria, key=f"cat_falta_{empleado['id']}"
+                    )
+                    justificacion = st.text_area(
+                        "Justificación obligatoria", key=f"just_falta_{empleado['id']}", height=70
+                    )
+                    foto = selector_evidencia(f"falta_{empleado['id']}")
+                    texto_boton = "🚨 Registrar falta (amonestación grave)" if siguiente_es_grave else "➕ Registrar falta (error estándar)"
+                    if st.form_submit_button(texto_boton):
+                        if not justificacion.strip():
+                            st.error("La justificación es obligatoria.")
+                        else:
+                            imagen_url = None
+                            if foto is not None:
+                                try:
+                                    imagen_url = subir_evidencia(supabase, empleado["id"], foto)
+                                except Exception as e:
+                                    st.warning(f"El registro se guardó, pero la foto no se pudo subir: {e}")
+                            categoria_id = (
+                                None if categoria_sel == OPCION_OTRO else categoria_id_por_nombre.get(categoria_sel)
+                            )
+                            if siguiente_es_grave:
+                                supabase.table("evaluaciones").insert(
+                                    {
+                                        "fecha": hoy,
+                                        "turno_id": empleado.get("turno_id"),
+                                        "mesonero_id": empleado["id"],
+                                        "evaluador_id": usuario["id"],
+                                        "tipo": "amonestacion_grave",
+                                        "categoria_id": categoria_id,
+                                        "justificacion": justificacion.strip(),
+                                        "imagen_url": imagen_url,
+                                        "porcentaje_bono": porcentaje_siguiente,
+                                        "es_grave_automatica": True,
+                                    }
+                                ).execute()
+                                registrar_log(
+                                    usuario,
+                                    "Registró amonestación grave automática (secuencia)",
+                                    f"{empleado['nombre_completo']} ({area['nombre']}): {justificacion.strip()} "
+                                    f"[falta #{numero_siguiente}, afecta bono {porcentaje_siguiente}%]",
                                 )
+                            else:
                                 supabase.table("evaluaciones").insert(
                                     {
                                         "fecha": hoy,
@@ -363,62 +399,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                     "Registró error estándar",
                                     f"{empleado['nombre_completo']} ({area['nombre']}): {justificacion.strip()}",
                                 )
-                                st.rerun()
-                else:
-                    st.warning(
-                        f"⚠️ **{empleado['nombre_completo']}** ya alcanzó el máximo de {max_errores} "
-                        f"errores estándar este mes en '{area['nombre']}'. El próximo registro debe ser "
-                        "una amonestación grave."
-                    )
-                    numero_amonestacion = len(amonestaciones_mes) + 1
-                    porcentaje_bono = calcular_porcentaje_bono(numero_amonestacion)
-                    st.error(
-                        f"💰 Esta sería la amonestación grave **#{numero_amonestacion}** de "
-                        f"{empleado['nombre_completo']} este mes → afecta el bono en **{porcentaje_bono}%**."
-                    )
-                    with st.form(key=f"form_grave_auto_{empleado['id']}", clear_on_submit=True):
-                        categoria_sel = st.selectbox(
-                            "Tipo de falta", opciones_categoria, key=f"cat_grave_auto_{empleado['id']}"
-                        )
-                        justificacion = st.text_area(
-                            "Justificación obligatoria (amonestación grave)",
-                            key=f"just_grave_auto_{empleado['id']}",
-                            height=70,
-                        )
-                        foto = selector_evidencia(f"grave_auto_{empleado['id']}")
-                        if st.form_submit_button("🚨 Registrar amonestación grave"):
-                            if not justificacion.strip():
-                                st.error("La justificación es obligatoria.")
-                            else:
-                                imagen_url = None
-                                if foto is not None:
-                                    try:
-                                        imagen_url = subir_evidencia(supabase, empleado["id"], foto)
-                                    except Exception as e:
-                                        st.warning(f"El registro se guardó, pero la foto no se pudo subir: {e}")
-                                categoria_id = (
-                                    None if categoria_sel == OPCION_OTRO else categoria_id_por_nombre.get(categoria_sel)
-                                )
-                                supabase.table("evaluaciones").insert(
-                                    {
-                                        "fecha": hoy,
-                                        "turno_id": empleado.get("turno_id"),
-                                        "mesonero_id": empleado["id"],
-                                        "evaluador_id": usuario["id"],
-                                        "tipo": "amonestacion_grave",
-                                        "categoria_id": categoria_id,
-                                        "justificacion": justificacion.strip(),
-                                        "imagen_url": imagen_url,
-                                        "porcentaje_bono": porcentaje_bono,
-                                    }
-                                ).execute()
-                                registrar_log(
-                                    usuario,
-                                    "Registró amonestación grave (por exceso de errores)",
-                                    f"{empleado['nombre_completo']} ({area['nombre']}): {justificacion.strip()} "
-                                    f"[afecta bono {porcentaje_bono}%]",
-                                )
-                                st.rerun()
+                            st.rerun()
 
                 st.markdown("---")
                 directa_key = f"mostrar_directa_{empleado['id']}"
@@ -470,6 +451,7 @@ def _panel_area(usuario, supabase, hoy, area, turnos_map, busqueda):
                                         "justificacion": justificacion_directa.strip(),
                                         "imagen_url": imagen_url,
                                         "porcentaje_bono": porcentaje_bono_directa,
+                                        "es_grave_automatica": False,
                                     }
                                 ).execute()
                                 registrar_log(
@@ -565,9 +547,11 @@ def _seccion_falta_general(
                         inicio_mes = hoy[:8] + "01"
                         for empleado in empleados_turno:
                             tipo_final = tipo_base
+                            es_automatica = False
+
                             if tipo_base == "error_estandar":
-                                # Respeta el tope individual de cada quien: si ya llegó al máximo
-                                # este mes, para esa persona esto se convierte en amonestación grave.
+                                # Misma secuencia que el registro individual: cada "max_errores"-ava
+                                # falta del mes (estándar + graves automáticas previas) es grave sola.
                                 errores_existentes = len(
                                     supabase.table("evaluaciones")
                                     .select("id")
@@ -578,8 +562,21 @@ def _seccion_falta_general(
                                     .execute()
                                     .data
                                 )
-                                if errores_existentes >= max_errores:
+                                graves_automaticas_existentes = len(
+                                    supabase.table("evaluaciones")
+                                    .select("id")
+                                    .eq("mesonero_id", empleado["id"])
+                                    .gte("fecha", inicio_mes)
+                                    .lte("fecha", hoy)
+                                    .eq("tipo", "amonestacion_grave")
+                                    .eq("es_grave_automatica", True)
+                                    .execute()
+                                    .data
+                                )
+                                numero_siguiente = errores_existentes + graves_automaticas_existentes + 1
+                                if numero_siguiente % max_errores == 0:
                                     tipo_final = "amonestacion_grave"
+                                    es_automatica = True
                                     convertidos_a_grave += 1
 
                             porcentaje_bono = None
@@ -588,18 +585,9 @@ def _seccion_falta_general(
                                     # Grave elegida directamente por el evaluador: usa el nivel manual.
                                     porcentaje_bono = OPCIONES_PORCENTAJE_BONO[nivel_sel]
                                 else:
-                                    # Convertida automáticamente por exceso de errores: sigue la secuencia 25/50/100.
-                                    amonestaciones_existentes = len(
-                                        supabase.table("evaluaciones")
-                                        .select("id")
-                                        .eq("mesonero_id", empleado["id"])
-                                        .gte("fecha", inicio_mes)
-                                        .lte("fecha", hoy)
-                                        .eq("tipo", "amonestacion_grave")
-                                        .execute()
-                                        .data
-                                    )
-                                    porcentaje_bono = calcular_porcentaje_bono(amonestaciones_existentes + 1)
+                                    # Salió sola por la secuencia (cada 3ra falta del mes).
+                                    numero_grave = numero_siguiente // max_errores
+                                    porcentaje_bono = calcular_porcentaje_bono(numero_grave)
                                 graves_aplicadas.append((empleado["nombre_completo"], porcentaje_bono))
 
                             supabase.table("evaluaciones").insert(
@@ -613,6 +601,7 @@ def _seccion_falta_general(
                                     "justificacion": f"[Falta general del turno] {justificacion.strip()}",
                                     "imagen_url": imagen_url,
                                     "porcentaje_bono": porcentaje_bono,
+                                    "es_grave_automatica": es_automatica,
                                 }
                             ).execute()
                             aplicados += 1
@@ -853,6 +842,11 @@ def dashboard(usuario):
         df["area"] = df["mesoneros"].apply(lambda x: ((x or {}).get("areas") or {}).get("nombre", "N/A"))
         df["evaluador"] = df["usuarios"].apply(lambda x: (x or {}).get("nombre_completo", "N/A"))
         df["categoria"] = df["categorias_falta"].apply(lambda x: (x or {}).get("nombre", "Otro") if x else "Otro")
+        if "porcentaje_bono" not in df.columns:
+            # Falta correr la migración de porcentaje_bono en Supabase; no romper el Dashboard por eso.
+            df["porcentaje_bono"] = None
+        if "imagen_url" not in df.columns:
+            df["imagen_url"] = None
 
     errores_df = df[df["tipo"] == "error_estandar"]
     graves_df = df[df["tipo"] == "amonestacion_grave"]
