@@ -962,6 +962,52 @@ def dashboard(usuario):
     st.divider()
 
     # -------------------------------------------------------------
+    # 👤 Detalle de faltas por persona (clic para ver el motivo de cada una)
+    # -------------------------------------------------------------
+    st.markdown("#### 👤 Detalle de faltas por persona (con estos filtros)")
+    if df.empty:
+        st.caption("No hay faltas registradas con estos filtros.")
+    else:
+        st.caption("Haz clic en cada persona para ver el motivo escrito de cada una de sus faltas.")
+        resumen_por_persona = (
+            df.groupby("trabajador")
+            .agg(
+                area=("area", "first"),
+                errores=("tipo", lambda s: (s == "error_estandar").sum()),
+                amonestaciones=("tipo", lambda s: (s == "amonestacion_grave").sum()),
+            )
+            .reset_index()
+            .sort_values(["amonestaciones", "errores"], ascending=False)
+        )
+
+        for _, fila in resumen_por_persona.iterrows():
+            nombre_persona = fila["trabajador"]
+            titulo_persona = (
+                f"{nombre_persona} ({fila['area']}) — {fila['errores']} errores · "
+                f"{fila['amonestaciones']} amonestaciones"
+            )
+            with st.expander(titulo_persona):
+                registros_persona = df[df["trabajador"] == nombre_persona].sort_values("fecha", ascending=False)
+                for _, r in registros_persona.iterrows():
+                    tipo_texto = "Error estándar" if r["tipo"] == "error_estandar" else "Amonestación grave"
+                    icono = "🔸" if r["tipo"] == "error_estandar" else "🚨"
+                    pct_texto = (
+                        f" — 💰 bono: {int(r['porcentaje_bono'])}%"
+                        if pd.notna(r.get("porcentaje_bono"))
+                        else ""
+                    )
+                    with st.container(border=True):
+                        st.write(
+                            f"{icono} **{r['fecha']}** — {tipo_texto} — **[{r['categoria']}]**{pct_texto} — "
+                            f"evaluó: *{r['evaluador']}*"
+                        )
+                        st.caption(r["justificacion"])
+                        if r.get("imagen_url"):
+                            mostrar_evidencia(r["imagen_url"])
+
+    st.divider()
+
+    # -------------------------------------------------------------
     # 📈 Tendencia + 🌟 Reconocimiento
     # -------------------------------------------------------------
     st.markdown("#### 📈 Tendencia en el tiempo (por semana)")
