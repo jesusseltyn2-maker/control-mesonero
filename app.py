@@ -1092,7 +1092,7 @@ def dashboard(usuario):
                             f"evaluó: *{r['evaluador']}*"
                         )
                         st.caption(r["justificacion"])
-                        if r.get("imagen_url"):
+                        if pd.notna(r.get("imagen_url")):
                             mostrar_evidencia(r["imagen_url"])
 
     st.divider()
@@ -1147,7 +1147,7 @@ def dashboard(usuario):
                         with st.container(border=True):
                             st.write(f"{icono} **{r['fecha']}** — {tipo_texto}{pct_texto} — evaluó: *{r['evaluador']}*")
                             st.caption(r["justificacion"])
-                            if r.get("imagen_url"):
+                            if pd.notna(r.get("imagen_url")):
                                 mostrar_evidencia(r["imagen_url"])
 
     st.divider()
